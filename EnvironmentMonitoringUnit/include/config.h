@@ -87,7 +87,7 @@ enum InterfaceId {
 #define UART_SELECT UART_SEL_USART2_PA2_PA3
 
 /* Baud rate for the debug UART (IF_UART). USB CDC ignores baud. */
-#define BAUD_RATE 9600
+#define BAUD_RATE 115200
 
 /* ===========================================================================
  * 3. IMU (IF_IMU) - permanently attached BNO086
@@ -134,6 +134,24 @@ enum InterfaceId {
 #define ENABLE_LED 1
 #define LED_PIN PA0
 #define LED_PULSE_MS 100
+
+/* ===========================================================================
+ * 7. I2C OUTPUT BUS
+ *
+ * Packaged IMU data is always written to a downstream I2C slave.
+ * The STM32 acts as I2C master.
+ *
+ * Recommended free pins on the 32-pin K-package (no conflicts with USART1
+ * PB6/PB7, USART2 PA2/PA3, USB PA11/PA12, or BNO086 control pins):
+ *   I2C2  SDA=PA8  SCL=PA9   (default)
+ *
+ * I2C_OUT_ADDR  - 7-bit address of the downstream slave device.
+ * I2C_OUT_SPEED - bus speed in Hz: 100000 (standard) or 400000 (fast).
+ * ========================================================================= */
+#define I2C_OUT_SDA   PA8
+#define I2C_OUT_SCL   PA9
+#define I2C_OUT_ADDR  0x42
+#define I2C_OUT_SPEED 400000
 
 /* ===========================================================================
  * DERIVED / GUARDS - do not edit below this line.

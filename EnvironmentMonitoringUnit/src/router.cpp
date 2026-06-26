@@ -5,16 +5,13 @@
  * ECHO ROUTING TABLE - edit this list to control which interface echoes to
  * which. Each entry forwards bytes received on 'from' out to 'to'.
  *
- * Default: echo the IMU to the debug UART (ST-Link VCP) only.
+ * IMU bytes are consumed by imu_reader (parsed into ImuPacket); do not add
+ * IF_IMU as a source here or bytes will be split between the two consumers.
+ *
+ * Example routes you can add:
+ *   { IF_UART, IF_USB },   mirror debug UART onto USB
  * ========================================================================= */
 static const Route ROUTES[] = {
-    { IF_IMU, IF_UART },  /* IMU data -> debug UART (ST-Link VCP) */
-    { IF_UART, IF_IMU },  /* debug UART -> IMU (e.g. for configuration) */
-    /* Examples you can add:
-     * { IF_IMU, IF_USB },   also stream IMU up to the USB host
-     * { IF_USB, IF_IMU },   pass USB host commands down to the IMU
-     * { IF_UART, IF_USB },  mirror debug UART onto USB
-     */
 };
 
 static const size_t ROUTE_COUNT = sizeof(ROUTES) / sizeof(ROUTES[0]);

@@ -5,6 +5,8 @@
 #include "debug_tx.h"
 #include "router.h"
 #include "bno086.h"
+#include "imu_reader.h"
+#include "data_publisher.h"
 
 /**
  * STM32G431KBT6 Environment Monitoring Unit.
@@ -14,13 +16,10 @@
  *   IF_UART - debug UART          (selectable, default USART2 PA2/PA3 -> VCP)
  *   IF_IMU  - IMU UART            (USART1 PB6/PB7, permanently attached IMU)
  *
- * Features (each a module with setup() + non-blocking update()):
- *   - debug_tx : periodic counter heartbeat to configured interface(s)
- *   - router   : echo any interface to any interface per ROUTES[] (router.cpp)
- *   - led      : non-blocking LED pulse per heartbeat
- *
- * The main loop never blocks. Configure everything in include/config.h
- * (and the ROUTES[] / HEARTBEAT_DESTINATIONS[] tables in the .cpp files).
+ * Data flow:
+ *   BNO086 -> IF_IMU -> imu_reader (parse RVC frames) -> data_publisher
+ *     data_publisher -> USB serial monitor  (if host connected)
+ *     data_publisher -> I2C output bus      (always, see config.h section 7)
  */
 
 void setup() {
@@ -41,11 +40,22 @@ void setup() {
     /* Reset the IMU and print its product ID before starting the heartbeat. */
     bno086_begin();
 
+    imu_reader_setup();
+    data_publisher_setup();
+
     debug_tx_setup();
 }
 
 void loop() {
-    debug_tx_update();   // heartbeat to configured interface(s)
-    router_update();     // echo interfaces per the routing table
-    led_update();        // turn LED off when its pulse elapses
+    debug_tx_update();           // heartbeat to configured interface(s)
+    router_update();             // echo interfaces per the routing table
+
+    imu_reader_update();         // parse incoming RVC bytes from BNO086
+
+    ImuPacket pkt;
+    if (imu_reader_get(pkt)) {
+        data_publisher_publish(pkt); // -> USB (if connected) + I2C (always)
+    }
+
+    led_update();                // turn LED off when its pulse elapses
 }
