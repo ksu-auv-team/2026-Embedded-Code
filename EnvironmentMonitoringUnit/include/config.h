@@ -123,7 +123,7 @@ enum InterfaceId {
  * ========================================================================= */
 /* Native USB on this board is non-functional, so all debug output is routed to
  * the ST-Link VCP (IF_UART). */
-#define HEARTBEAT_DESTINATIONS IF_UART
+#define HEARTBEAT_DESTINATIONS
 
 #define SEND_INTERVAL_MS 1000
 #define COUNTER_MAX 255
