@@ -28,6 +28,8 @@ static const uint32_t REPORT_INTERVAL_MS = 10;
 static bool      s_has_packet;
 static ImuPacket s_packet;
 
+uint32_t g_rv_count = 0;   /* DIAGNOSTIC: parsed Rotation Vector reports */
+
 /* --- SH-2 / SHTP report ids and fixed-point scales (from the BNO08x datasheet) */
 #define SH2_TIMEBASE_REF    0xFB   /* Base Timestamp Reference report          */
 #define SH2_LINEAR_ACCEL    0x04   /* Linear acceleration, m/s^2, Q8           */
@@ -89,6 +91,8 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
         s_packet.roll  = (int16_t)lroundf(roll  * C);
         s_packet.index++;
         s_has_packet = true;
+        /* DIAGNOSTIC: confirm RV reports are being parsed (rate-limited). */
+        extern uint32_t g_rv_count; g_rv_count++;
         return 14;
     }
     case SH2_LINEAR_ACCEL: {              /* 4 + x,y,z (3*2) */
@@ -103,32 +107,57 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
     }
 }
 
-/* Parse a complete deframed SHTP frame: walk the cargo, handling the optional
- * 0xFB timebase prefix and any sensor reports we recognize. */
+/* Parse a complete deframed SHTP frame. The exact position of the channel/seq
+ * header bytes proved unreliable on this link (the deframed payload sometimes
+ * starts a byte or two off), so we do NOT gate on the channel field. Instead we
+ * SCAN the whole frame for the 0xFB Base Timestamp Reference that prefixes a
+ * batch of input reports; the sensor report(s) follow it. If no timebase is
+ * found, we fall back to scanning the whole frame for recognized report ids. */
 static void parse_shtp_frame(const uint8_t *f, size_t n) {
-    if (n < 5) return;
-    const uint8_t channel = f[2] & 0x0F;
-    if (channel != SHTP_CH_INPUT && channel != SHTP_CH_WAKE) return;
+    if (n < 6) return;
 
-    size_t i = 4;                         /* start of cargo (after 4-byte header) */
-    if (i < n && f[i] == SH2_TIMEBASE_REF) i += 5;   /* skip timebase report */
+    /* Locate the timebase marker (0xFB). On this link the Base Timestamp Ref is
+     * 4 bytes total (0xFB + 1 delta byte + 2 trailing bytes), so the first
+     * sensor report's id is exactly 4 bytes after the 0xFB. (Empirically from
+     * captured frames: "... FB dd 00 00 [report_id] [seq] [status] [delay] ..."). */
+    size_t i = 0;
+    bool found_tb = false;
+    for (size_t k = 0; k + 4 < n; k++) {
+        if (f[k] == SH2_TIMEBASE_REF) { i = k + 4; found_tb = true; break; }
+    }
+    if (!found_tb) i = 4;                 /* no timebase: start after SHTP header */
 
-    /* Walk remaining cargo, parsing reports we know and stepping over the rest. */
+    /* Walk the cargo. Recognized reports advance by their length; anything else
+     * advances by one byte (resync), so a stray/unknown id can't derail us.
+     * Guard i <= n so the (n - i) length passed to parse_report never wraps. */
     while (i < n) {
         size_t used = parse_report(&f[i], n - i);
-        if (used == 0) {
-            /* Not a recognized report at this offset: resync by scanning forward
-             * to the next byte that looks like one of our report ids. */
-            i++;
-            continue;
-        }
-        i += used;
+        i += (used ? used : 1);
     }
+}
+
+/* DIAGNOSTIC: dump the first N complete deframed frames in full, as hex, to the
+ * VCP so the exact SHTP-over-UART byte layout can be analyzed offline. */
+#define DUMP_FRAMES 200
+static uint32_t s_dump_count = 0;
+static void dump_frame(const uint8_t *f, size_t n) {
+    if (s_dump_count >= DUMP_FRAMES) return;
+    s_dump_count++;
+    Stream *c = interface_get(IF_UART);
+    if (!c) return;
+    c->print("F["); c->print(n); c->print("]:");
+    for (size_t i = 0; i < n; i++) {
+        c->print(' ');
+        if (f[i] < 16) c->print('0');
+        c->print(f[i], HEX);
+    }
+    c->println();
 }
 
 static void deframe_byte(uint8_t b) {
     if (b == HDLC_FLAG) {
         if (s_in_frame && s_got_pid && s_frame_len >= 5) {
+            dump_frame(s_frame, s_frame_len);
             parse_shtp_frame(s_frame, s_frame_len);
         }
         s_in_frame  = true;
@@ -148,6 +177,10 @@ static void deframe_byte(uint8_t b) {
         return;
     }
 
+    /* A 0x7E closes the frame; per the SHTP length header we should keep
+     * accumulating until the byte count matches. Some captured frames came up
+     * short, suggesting an early flag or RX loss - track the expected length so
+     * we can tell which. */
     if (s_frame_len < SHTP_FRAME_MAX) s_frame[s_frame_len++] = b;
     else                              s_in_frame = false;
 }
@@ -178,6 +211,16 @@ void imu_source_update(void) {
     int budget = 512;
     while (imu.available() && budget-- > 0) {
         deframe_byte((uint8_t)imu.read());
+    }
+
+    /* DIAGNOSTIC: 1 Hz report of how many RV reports we've parsed. */
+    static uint32_t last_ms = 0;
+    uint32_t now = millis();
+    if (now - last_ms >= 1000) {
+        last_ms = now;
+        if (Stream *c = interface_get(IF_UART)) {
+            c->print("IMU diag: rv_parsed="); c->println(g_rv_count);
+        }
     }
 }
 
