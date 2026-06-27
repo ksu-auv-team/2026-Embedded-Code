@@ -28,13 +28,15 @@ void data_publisher_publish(const ImuPacket &pkt) {
      * goes to the ST-Link VCP (IF_UART) instead of USB. */
     Stream *dbg = interface_get(IF_UART);
     if (dbg) {
-        /* Format: YAW:ddd.dd,PITCH:ddd.dd,ROLL:ddd.dd,AX:d.dd,AY:d.dd,AZ:d.dd */
+        /* Format: YAW:d.dd,PITCH:d.dd,ROLL:d.dd,AX:d.dd,AY:d.dd,AZ:d.dd,ACC:n
+         * ACC is the BNO fusion accuracy 0 (unreliable) .. 3 (high). */
         dbg->print("YAW:");    dbg->print(pkt.yaw   / 100.0f, 2);
         dbg->print(",PITCH:"); dbg->print(pkt.pitch / 100.0f, 2);
         dbg->print(",ROLL:");  dbg->print(pkt.roll  / 100.0f, 2);
         dbg->print(",AX:");    dbg->print(pkt.accel_x / 100.0f, 2);
         dbg->print(",AY:");    dbg->print(pkt.accel_y / 100.0f, 2);
-        dbg->print(",AZ:");    dbg->println(pkt.accel_z / 100.0f, 2);
+        dbg->print(",AZ:");    dbg->print(pkt.accel_z / 100.0f, 2);
+        dbg->print(",ACC:");   dbg->println(pkt.accuracy);
     }
 
     /* --- I2C: binary ImuPacket struct, always ----------------------------- */

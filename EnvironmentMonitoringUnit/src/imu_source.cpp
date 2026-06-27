@@ -72,12 +72,17 @@ static const uint32_t REPORT_ENABLE_GAP_MS = 20;
 static bool      s_has_packet;
 static ImuPacket s_packet;
 
-/* --- SHTP / SH-2 protocol constants (BNO08x datasheet) --- */
-#define SHTP_CH_CONTROL     2      /* control channel (Set-Feature commands)   */
+/* --- SHTP / SH-2 protocol constants (BNO08x datasheet / SH-2 reference) --- */
+#define SHTP_CH_CONTROL     2      /* control channel (Set-Feature / commands) */
 #define SH2_CMD_SET_FEATURE 0xFD   /* Set Feature Command report id            */
+#define SH2_CMD_REQUEST     0xF2   /* Command Request report id                */
 #define SH2_TIMEBASE_REF    0xFB   /* Base Timestamp Reference report          */
 #define SH2_LINEAR_ACCEL    0x04   /* Linear acceleration, m/s^2, Q8           */
 #define SH2_ROTATION_VECTOR 0x05   /* Rotation vector quaternion, unitless, Q14 */
+
+/* SH-2 commands carried in the Command Request (0xF2) report. */
+#define SH2_COMMAND_SAVE_DCD       0x06  /* persist calibration to BNO flash    */
+#define SH2_COMMAND_ME_CALIBRATE   0x07  /* configure dynamic (ME) calibration  */
 
 /* SH-2 fixed-point scales: raw int16 / scale = engineering units. */
 #define Q8_SCALE   256.0f          /* m/s^2 (accel)                            */
@@ -102,21 +107,40 @@ static inline int16_t read_i16_le(const uint8_t *p) {
     return (int16_t)(p[0] | (p[1] << 8));
 }
 
-/* --- SHTP transmit (Set Feature) ------------------------------------------- *
- * Build a 21-byte SHTP Set-Feature command on the control channel and send it
- * HDLC-wrapped over the IMU UART. We do NOT wait for the command response (it
- * is unreliable to catch at 3 Mbaud); the requested report simply starts
- * streaming, which our RX path then decodes. */
-static uint8_t s_ctrl_seq = 0;
+/* --- SHTP transmit ---------------------------------------------------------- *
+ * All control traffic (Set-Feature, Command Request) is built as an SHTP
+ * payload on the control channel, then HDLC-wrapped over the IMU UART. We do
+ * NOT wait for command responses (unreliable to catch at 3 Mbaud); commands
+ * simply take effect, and the resulting reports stream in for our RX path. */
+static uint8_t s_ctrl_seq = 0;     /* SHTP control-channel sequence number      */
+static uint8_t s_cmd_seq  = 0;     /* SH-2 Command Request sequence number       */
 
+/* Build the 4-byte SHTP header for an SHTP payload of total length 'len'
+ * (header + cargo) on the control channel, then HDLC-frame and send it. The
+ * caller fills f[4..] with the SH-2 report; f[0..3] are written here. */
+static void shtp_send_frame(uint8_t *f, size_t len) {
+    f[0] = len & 0xFF;                /* SHTP length LSB (incl. 4-byte header)   */
+    f[1] = len >> 8;                  /* SHTP length MSB                         */
+    f[2] = SHTP_CH_CONTROL;           /* channel                                 */
+    f[3] = s_ctrl_seq++;              /* SHTP sequence                           */
+
+    HardwareSerial &s = imu_hardware_serial();
+    s.write(HDLC_FLAG);
+    s.write(SHTP_PID);
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = f[i];
+        if (b == HDLC_FLAG || b == HDLC_ESC) { s.write(HDLC_ESC); s.write((uint8_t)(b ^ 0x20)); }
+        else                                 { s.write(b); }
+    }
+    s.write(HDLC_FLAG);
+    s.flush();
+}
+
+/* Set Feature Command (0xFD): request periodic output of 'report_id'. */
 static void shtp_tx_set_feature(uint8_t report_id, uint32_t interval_ms) {
     const uint32_t us = interval_ms * 1000UL;
     uint8_t f[21] = {0};
-    f[0] = sizeof(f) & 0xFF;          /* SHTP length LSB (incl. 4-byte header)  */
-    f[1] = sizeof(f) >> 8;            /* SHTP length MSB                        */
-    f[2] = SHTP_CH_CONTROL;           /* channel                                */
-    f[3] = s_ctrl_seq++;              /* sequence                               */
-    f[4] = SH2_CMD_SET_FEATURE;       /* 0xFD Set Feature                       */
+    f[4] = SH2_CMD_SET_FEATURE;
     f[5] = report_id;                 /* feature / report id                    */
     /* f[6..8] = flags + change sensitivity (0) */
     f[9]  =  us        & 0xFF;        /* report interval (us), LE               */
@@ -124,17 +148,31 @@ static void shtp_tx_set_feature(uint8_t report_id, uint32_t interval_ms) {
     f[11] = (us >> 16) & 0xFF;
     f[12] = (us >> 24) & 0xFF;
     /* f[13..20] = batch interval + reserved (0) */
+    shtp_send_frame(f, sizeof(f));
+}
 
-    HardwareSerial &s = imu_hardware_serial();
-    s.write(HDLC_FLAG);
-    s.write(SHTP_PID);
-    for (size_t i = 0; i < sizeof(f); i++) {
-        uint8_t b = f[i];
-        if (b == HDLC_FLAG || b == HDLC_ESC) { s.write(HDLC_ESC); s.write((uint8_t)(b ^ 0x20)); }
-        else                                 { s.write(b); }
-    }
-    s.write(HDLC_FLAG);
-    s.flush();
+/* Command Request (0xF2): issue SH-2 command 'cmd' with parameters p[0..8]. */
+static void shtp_tx_command(uint8_t cmd, const uint8_t p[9]) {
+    uint8_t f[16] = {0};              /* 4 SHTP hdr + 0xF2 + seq + cmd + 9 params */
+    f[4] = SH2_CMD_REQUEST;
+    f[5] = s_cmd_seq++;               /* command sequence number                */
+    f[6] = cmd;
+    for (int i = 0; i < 9; i++) f[7 + i] = p ? p[i] : 0;
+    shtp_send_frame(f, sizeof(f));
+}
+
+/* Enable/disable dynamic (ME) calibration for accel, gyro and mag. */
+static void imu_set_autocal(bool on) {
+    const uint8_t e = on ? 1 : 0;
+    /* P0=accel P1=gyro P2=mag P3=0(Configure ME Cal) P4=planar accel */
+    const uint8_t p[9] = { e, e, e, 0, e, 0, 0, 0, 0 };
+    shtp_tx_command(SH2_COMMAND_ME_CALIBRATE, p);
+}
+
+/* Persist the current dynamic calibration to the BNO086's flash (Save DCD). */
+static void imu_save_calibration(void) {
+    const uint8_t p[9] = {0};
+    shtp_tx_command(SH2_COMMAND_SAVE_DCD, p);
 }
 
 /* Enable a periodic sensor report. The BNO ignores commands sent before it has
@@ -174,6 +212,26 @@ static bool     s_in_frame  = false;
 static bool     s_escaped   = false;
 static bool     s_got_pid   = false;
 
+#if CAL_ENABLE_CONTROLLER
+/* Dynamic-calibration controller with hysteresis (see imu_config.h section 5).
+ * Driven by each Rotation Vector report's accuracy (0..3). Autocal starts OFF
+ * (the device uses its saved calibration); we re-enable it when accuracy drops
+ * too low, and Save-DCD + disable once it has recovered. Edge-triggered so we
+ * issue a command only on a state change, not every frame. */
+static bool s_autocal_on = false;
+
+static void calibration_controller(uint8_t accuracy) {
+    if (!s_autocal_on && accuracy < CAL_REENABLE_LEVEL) {
+        imu_set_autocal(true);
+        s_autocal_on = true;
+    } else if (s_autocal_on && accuracy >= CAL_SAVE_LEVEL) {
+        imu_save_calibration();
+        imu_set_autocal(false);
+        s_autocal_on = false;
+    }
+}
+#endif
+
 /* Convert a unit quaternion (SH-2 i,j,k,r order, r = scalar) to ZYX Euler
  * angles in radians. */
 static void quat_to_euler(float i, float j, float k, float r,
@@ -203,8 +261,14 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
         s_packet.yaw   = (int16_t)lroundf(yaw   * RAD_TO_CENTIDEG);
         s_packet.pitch = (int16_t)lroundf(pitch * RAD_TO_CENTIDEG);
         s_packet.roll  = (int16_t)lroundf(roll  * RAD_TO_CENTIDEG);
+        /* status byte (report header [id][seq][status][delay]); low 2 bits =
+         * fusion accuracy 0..3. */
+        s_packet.accuracy = p[2] & 0x03;
         s_packet.index++;
         s_has_packet = true;
+#if CAL_ENABLE_CONTROLLER
+        calibration_controller(s_packet.accuracy);
+#endif
         return REPORT_LEN_RV;
     }
     case SH2_LINEAR_ACCEL: {

@@ -64,4 +64,30 @@
 
 #define IMU_UART_SELECT IMU_SEL_USART1_PB6_PB7
 
+/* ---------------------------------------------------------------------------
+ * 5. DYNAMIC CALIBRATION CONTROLLER
+ *
+ * The BNO086 continuously self-calibrates (accel/gyro/mag) when its "ME
+ * Calibration" is enabled, and reports an accuracy/status (0=unreliable ..
+ * 3=high) in every Rotation Vector report. This controller manages that with
+ * hysteresis so the device is stable in normal use and only recalibrates when
+ * accuracy degrades:
+ *
+ *   - At boot, autocal is OFF (the device uses its saved calibration / DCD), so
+ *     orientation is not perturbed by ongoing recalibration.
+ *   - If accuracy drops BELOW CAL_REENABLE_LEVEL, autocal is re-enabled so the
+ *     device recalibrates (e.g. after a magnetic disturbance; rotate the unit
+ *     through orientations / a figure-8 to help it converge).
+ *   - Once accuracy recovers to >= CAL_SAVE_LEVEL, the calibration is saved to
+ *     the BNO's flash (Save DCD) and autocal is turned OFF again.
+ *
+ * Keep CAL_SAVE_LEVEL >= CAL_REENABLE_LEVEL so the enable/save band has
+ * hysteresis and the controller can't thrash (Save DCD writes BNO flash).
+ * Set CAL_ENABLE_CONTROLLER to 0 to compile the controller out (autocal stays
+ * off; accuracy is still reported).
+ * ------------------------------------------------------------------------- */
+#define CAL_ENABLE_CONTROLLER 1
+#define CAL_REENABLE_LEVEL    1   /* accuracy <  this -> re-enable autocal      */
+#define CAL_SAVE_LEVEL        3   /* accuracy >= this -> Save DCD + autocal off */
+
 #endif // IMU_CONFIG_H

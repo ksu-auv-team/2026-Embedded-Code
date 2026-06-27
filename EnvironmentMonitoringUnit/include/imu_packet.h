@@ -8,7 +8,7 @@
  * Raw units: angles in 1/100 degrees, accelerations in 1/100 m/s^2.
  * Divide by 100.0f to get degrees / m/s^2.
  *
- * Sent over I2C as a packed binary struct (13 bytes).
+ * Sent over I2C as a packed binary struct (14 bytes).
  */
 struct ImuPacket {
     uint8_t index;     // BNO086 rolling frame counter (0-255)
@@ -18,6 +18,7 @@ struct ImuPacket {
     int16_t accel_x;   // 1/100 m/s^2
     int16_t accel_y;
     int16_t accel_z;
+    uint8_t accuracy;  // BNO fusion accuracy/status: 0=unreliable .. 3=high
 } __attribute__((packed));
 
 #endif // IMU_PACKET_H
