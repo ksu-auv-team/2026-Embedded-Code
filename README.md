@@ -13,7 +13,11 @@ Collection of our Embedded Code
 | 6 | 4f | Torpedo Controller |
 | 7 | 50 | Arm Controller |
 
-# IMU I2C Packet
+# Environment Monitor
+
+The Environment Monitor consists of a STM32G431KBT6, BNO086, and BME280. The blue LED flashes 4 times on boot, stays on for 1 second if IMU communication is successful, then continues to flash every time it recieves an I2C interrupt. The I2C register is updated every 10ms (100Hz).
+
+## I2C Packet
 
 | Byte | Field | Type | Encoding |
 |-------|:---:|------|------------|
@@ -26,4 +30,4 @@ Collection of our Embedded Code
 | 11-12 | accel_z | i16 LE | 1/100 m/s² |
 | 13 | accuracy | u8 | 0=unreliable .. 3-high |
 
-The IMU I2C register is updated every 10ms (100Hz)
+# ESC Controller
