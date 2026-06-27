@@ -142,7 +142,6 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
         s_packet.roll  = (int16_t)lroundf(roll  * C);
         s_packet.index++;
         s_has_packet = true;
-        extern uint32_t g_packet_count; g_packet_count++;
         return 12;
     }
     case SH2_LINEAR_ACCEL: {              /* [id,seq,status,delay] + x,y,z (3*2) */
@@ -157,12 +156,11 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
     }
 }
 
-/* Parse a complete deframed SHTP frame. The exact position of the channel/seq
- * header bytes proved unreliable on this link (the deframed payload sometimes
- * starts a byte or two off), so we do NOT gate on the channel field. Instead we
- * SCAN the whole frame for the 0xFB Base Timestamp Reference that prefixes a
- * batch of input reports; the sensor report(s) follow it. If no timebase is
- * found, we fall back to scanning the whole frame for recognized report ids. */
+/* Parse a complete deframed SHTP frame. SHTP input reports are prefixed by a
+ * 0xFB Base Timestamp Reference; rather than depend on a fixed header offset we
+ * SCAN for that 0xFB and parse the sensor report(s) that follow it (with a
+ * byte-by-byte resync fallback if no timebase is present). This is robust to
+ * the channel/seq header bytes varying in position between frames. */
 static void parse_shtp_frame(const uint8_t *f, size_t n) {
     if (n < 6) return;
 
@@ -186,29 +184,11 @@ static void parse_shtp_frame(const uint8_t *f, size_t n) {
     }
 }
 
-/* DIAGNOSTIC (cheap, no per-frame printing): track frame stats for a 1 Hz report. */
-uint32_t g_frame_count = 0;
-uint32_t g_packet_count = 0;
-uint8_t  g_max_len = 0;
-
-/* DIAGNOSTIC: RAM recorder - store raw frames WITHOUT printing (non-blocking),
- * so capture doesn't corrupt the 3 Mbaud stream. Flushed once by imu_source. */
-#define REC_MAX 40
-uint8_t  g_rec[REC_MAX][32];
-uint8_t  g_rec_len[REC_MAX];
-uint32_t g_rec_count = 0;
-
 static void deframe_byte(uint8_t b) {
     if (b == HDLC_FLAG) {
+        /* A flag closes the current frame and opens the next - the resync point
+         * the library's rx() lacked. */
         if (s_in_frame && s_got_pid && s_frame_len >= 5) {
-            g_frame_count++;
-            if (s_frame_len > g_max_len) g_max_len = (uint8_t)s_frame_len;
-            if (g_rec_count < REC_MAX) {
-                uint8_t cl = s_frame_len < 32 ? (uint8_t)s_frame_len : 32;
-                for (uint8_t z = 0; z < cl; z++) g_rec[g_rec_count][z] = s_frame[z];
-                g_rec_len[g_rec_count] = cl;
-                g_rec_count++;
-            }
             parse_shtp_frame(s_frame, s_frame_len);
         }
         s_in_frame  = true;
@@ -228,12 +208,8 @@ static void deframe_byte(uint8_t b) {
         return;
     }
 
-    /* A 0x7E closes the frame; per the SHTP length header we should keep
-     * accumulating until the byte count matches. Some captured frames came up
-     * short, suggesting an early flag or RX loss - track the expected length so
-     * we can tell which. */
     if (s_frame_len < SHTP_FRAME_MAX) s_frame[s_frame_len++] = b;
-    else                              s_in_frame = false;
+    else                              s_in_frame = false;   /* overflow: resync at next flag */
 }
 
 void imu_source_setup(void) {
@@ -260,13 +236,11 @@ void imu_source_setup(void) {
 }
 
 void imu_source_update(void) {
-    /* Drain whatever the IMU UART has buffered through our resync-capable
-     * deframer; each complete frame is parsed inline (parse_shtp_frame), which
-     * fills s_packet and sets s_has_packet. Cap the per-call byte count so a
-     * flooded FIFO can't starve loop(); leftover bytes are read next tick. */
 #if IMU_DMA_RX
-    /* Consume all bytes the DMA has written since last time, in order, through
-     * the deframer. The DMA never drops a byte, so frames arrive intact. */
+    /* Consume every byte the DMA has written since last call, in order, through
+     * the deframer. The DMA captures the full 3 Mbaud stream with no CPU
+     * involvement, so no byte is ever dropped and frames arrive intact. Each
+     * complete frame is parsed inline (parse_shtp_frame), filling s_packet. */
     size_t head = imu_dma_head();
     while (s_dma_tail != head) {
         deframe_byte(s_dma_buf[s_dma_tail]);
@@ -274,44 +248,14 @@ void imu_source_update(void) {
         head = imu_dma_head();   /* re-read: more may have arrived while parsing */
     }
 #else
+    /* Fallback (non-USART1 builds): interrupt-driven RX. Note this drops bytes
+     * at 3 Mbaud - DMA RX above is required for reliable SHTP framing. */
     HardwareSerial &imu = imu_hardware_serial();
     int budget = 512;
     while (imu.available() && budget-- > 0) {
         deframe_byte((uint8_t)imu.read());
     }
 #endif
-
-    /* DIAGNOSTIC: single cheap 1 Hz line - frames seen, max frame length, and
-     * RV packets parsed. Tells us if frames are full-length (>=18) and whether
-     * the parser is producing packets. */
-    extern uint32_t g_frame_count, g_packet_count; extern uint8_t g_max_len;
-    extern uint8_t g_rec[][32]; extern uint8_t g_rec_len[]; extern uint32_t g_rec_count;
-    static bool flushed = false;
-    static uint32_t last_ms = 0;
-    uint32_t now = millis();
-    if (now - last_ms >= 1000) {
-        last_ms = now;
-        Stream *c = interface_get(IF_UART);
-        if (c) {
-            c->print("IMU diag: frames="); c->print(g_frame_count);
-            c->print(" maxlen="); c->print(g_max_len);
-            c->print(" rv_packets="); c->println(g_packet_count);
-            /* One-shot raw-frame flush once the RAM recorder is full. */
-            if (!flushed && g_rec_count >= REC_MAX) {
-                flushed = true;
-                for (uint32_t r = 0; r < g_rec_count; r++) {
-                    c->print("R["); c->print(g_rec_len[r]); c->print("]:");
-                    for (uint8_t z = 0; z < g_rec_len[r]; z++) {
-                        c->print(' ');
-                        if (g_rec[r][z] < 16) c->print('0');
-                        c->print(g_rec[r][z], HEX);
-                    }
-                    c->println();
-                }
-            }
-        }
-        g_max_len = 0;
-    }
 }
 
 bool imu_source_get(ImuPacket &out) {
