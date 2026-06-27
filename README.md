@@ -25,3 +25,5 @@ Collection of our Embedded Code
 | 9-10 | accel_y | i16 LE | 1/100 m/s² |
 | 11-12 | accel_z | i16 LE | 1/100 m/s² |
 | 13 | accuracy | u8 | 0=unreliable .. 3-high |
+
+The IMU I2C register is updated every 10ms (100Hz)
