@@ -138,22 +138,22 @@ enum InterfaceId {
 #define LED_PULSE_MS 100
 
 /* ===========================================================================
- * 7. I2C OUTPUT BUS
+ * 7. I2C SLAVE (IMU data output)
  *
- * Packaged IMU data is always written to a downstream I2C slave.
- * The STM32 acts as I2C master.
+ * The STM32 acts as an I2C SLAVE. An external host (the bus master) reads the
+ * latest ImuPacket from the STM32 on demand - a plain I2C read returns the most
+ * recent 14-byte packet. The STM32 never initiates transfers and does not set
+ * the bus clock (the master drives SCL).
  *
  * Recommended free pins on the 32-pin K-package (no conflicts with USART1
  * PB6/PB7, USART2 PA2/PA3, USB PA11/PA12, or BNO086 control pins):
  *   I2C2  SDA=PA8  SCL=PA9   (default)
  *
- * I2C_OUT_ADDR  - 7-bit address of the downstream slave device.
- * I2C_OUT_SPEED - bus speed in Hz: 100000 (standard) or 400000 (fast).
+ * I2C_SLAVE_ADDR - the 7-bit address this STM32 responds to.
  * ========================================================================= */
-#define I2C_OUT_SDA   PA8
-#define I2C_OUT_SCL   PA9
-#define I2C_OUT_ADDR  0x42
-#define I2C_OUT_SPEED 400000
+#define I2C_SLAVE_SDA   PA8
+#define I2C_SLAVE_SCL   PA9
+#define I2C_SLAVE_ADDR  0x4B
 
 /* ===========================================================================
  * 8. IMU PUBLISH RATE
