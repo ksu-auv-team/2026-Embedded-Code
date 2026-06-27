@@ -64,6 +64,11 @@
 /* Report rate: 10 ms => 100 Hz, matching the old UART-RVC stream rate. */
 static const uint32_t REPORT_INTERVAL_MS = 10;
 
+/* Bring-up timing: wait for the BNO to finish its post-reset advertisement
+ * before commanding it, and the inter-command gap when enabling reports. */
+static const uint32_t BOOT_SETTLE_MS       = 200;
+static const uint32_t REPORT_ENABLE_GAP_MS = 20;
+
 static bool      s_has_packet;
 static ImuPacket s_packet;
 
@@ -73,15 +78,29 @@ static ImuPacket s_packet;
 #define SH2_TIMEBASE_REF    0xFB   /* Base Timestamp Reference report          */
 #define SH2_LINEAR_ACCEL    0x04   /* Linear acceleration, m/s^2, Q8           */
 #define SH2_ROTATION_VECTOR 0x05   /* Rotation vector quaternion, unitless, Q14 */
-#define Q8_SCALE   256.0f
-#define Q14_SCALE  16384.0f
+
+/* SH-2 fixed-point scales: raw int16 / scale = engineering units. */
+#define Q8_SCALE   256.0f          /* m/s^2 (accel)                            */
+#define Q14_SCALE  16384.0f        /* unitless (quaternion)                    */
+
+/* Sensor report layout: [id][seq][status][delay] header, then int16 LE data. */
+#define REPORT_HEADER_BYTES 4
+#define REPORT_LEN_RV   (REPORT_HEADER_BYTES + 4 * 2)   /* i,j,k,r            */
+#define REPORT_LEN_ACC  (REPORT_HEADER_BYTES + 3 * 2)   /* x,y,z             */
 
 /* HDLC framing for UART-SHTP: 0x7E flags, 0x7D escape (byte ^ 0x20). */
 #define HDLC_FLAG 0x7E
 #define HDLC_ESC  0x7D
 #define SHTP_PID  0x01
 
-static inline int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
+/* ImuPacket units: angles in centidegrees, accel in 1/100 m/s^2. */
+#define RAD_TO_CENTIDEG (18000.0f / (float)M_PI)
+#define MPS2_TO_CENTI   100.0f
+
+/* Read a signed 16-bit little-endian value from a byte pointer. */
+static inline int16_t read_i16_le(const uint8_t *p) {
+    return (int16_t)(p[0] | (p[1] << 8));
+}
 
 /* --- SHTP transmit (Set Feature) ------------------------------------------- *
  * Build a 21-byte SHTP Set-Feature command on the control channel and send it
@@ -118,6 +137,17 @@ static void shtp_tx_set_feature(uint8_t report_id, uint32_t interval_ms) {
     s.flush();
 }
 
+/* Enable a periodic sensor report. The BNO ignores commands sent before it has
+ * finished its post-reset advertisement, and may miss a single command, so we
+ * send the Set-Feature twice with a short gap. We do not wait for / require the
+ * command response (unreliable at 3 Mbaud); the report simply starts streaming. */
+static void enable_report(uint8_t report_id, uint32_t interval_ms) {
+    shtp_tx_set_feature(report_id, interval_ms);
+    delay(REPORT_ENABLE_GAP_MS);
+    shtp_tx_set_feature(report_id, interval_ms);
+    delay(REPORT_ENABLE_GAP_MS);
+}
+
 /* --- HDLC deframer + SHTP report parser ------------------------------------ *
  * Process the IMU UART byte-by-byte: RESYNC on 0x7E, unescape 0x7D, strip the
  * protocol-id byte, then parse the resulting SHTP frame. Resyncing on every
@@ -144,37 +174,45 @@ static bool     s_in_frame  = false;
 static bool     s_escaped   = false;
 static bool     s_got_pid   = false;
 
+/* Convert a unit quaternion (SH-2 i,j,k,r order, r = scalar) to ZYX Euler
+ * angles in radians. */
+static void quat_to_euler(float i, float j, float k, float r,
+                          float &yaw, float &pitch, float &roll) {
+    roll = atan2f(2.0f * (r * i + j * k), 1.0f - 2.0f * (i * i + j * j));
+    float sinp = 2.0f * (r * j - k * i);
+    sinp = sinp > 1.0f ? 1.0f : (sinp < -1.0f ? -1.0f : sinp);  /* clamp at poles */
+    pitch = asinf(sinp);
+    yaw = atan2f(2.0f * (r * k + i * j), 1.0f - 2.0f * (j * j + k * k));
+}
+
 /* Parse one sensor report starting at p (id,seq,status,delay,data...). Returns
- * the report length consumed, or 0 if the id isn't one we handle / truncated. */
+ * the report length consumed, or 0 if the id isn't one we handle / truncated.
+ * Decoded values are stored into s_packet (centidegrees / centi-m/s^2). */
 static size_t parse_report(const uint8_t *p, size_t avail) {
     if (avail < 1) return 0;
+    const uint8_t *data = p + REPORT_HEADER_BYTES;
     switch (p[0]) {
-    case SH2_ROTATION_VECTOR: {           /* [id,seq,status,delay] + i,j,k,r (4*2) */
-        if (avail < 12) return 0;         /* need p[0..11]: 4 hdr + 8 quat bytes */
-        float i = rd16(&p[4])  / Q14_SCALE;
-        float j = rd16(&p[6])  / Q14_SCALE;
-        float k = rd16(&p[8])  / Q14_SCALE;
-        float r = rd16(&p[10]) / Q14_SCALE;
-        /* quat -> ZYX Euler (radians) */
-        float roll  = atan2f(2.0f * (r * i + j * k), 1.0f - 2.0f * (i * i + j * j));
-        float sinp  = 2.0f * (r * j - k * i);
-        sinp = sinp > 1.0f ? 1.0f : (sinp < -1.0f ? -1.0f : sinp);
-        float pitch = asinf(sinp);
-        float yaw   = atan2f(2.0f * (r * k + i * j), 1.0f - 2.0f * (j * j + k * k));
-        const float C = 18000.0f / (float)M_PI;   /* rad -> centidegrees */
-        s_packet.yaw   = (int16_t)lroundf(yaw   * C);
-        s_packet.pitch = (int16_t)lroundf(pitch * C);
-        s_packet.roll  = (int16_t)lroundf(roll  * C);
+    case SH2_ROTATION_VECTOR: {
+        if (avail < REPORT_LEN_RV) return 0;
+        float yaw, pitch, roll;
+        quat_to_euler(read_i16_le(&data[0]) / Q14_SCALE,
+                      read_i16_le(&data[2]) / Q14_SCALE,
+                      read_i16_le(&data[4]) / Q14_SCALE,
+                      read_i16_le(&data[6]) / Q14_SCALE,
+                      yaw, pitch, roll);
+        s_packet.yaw   = (int16_t)lroundf(yaw   * RAD_TO_CENTIDEG);
+        s_packet.pitch = (int16_t)lroundf(pitch * RAD_TO_CENTIDEG);
+        s_packet.roll  = (int16_t)lroundf(roll  * RAD_TO_CENTIDEG);
         s_packet.index++;
         s_has_packet = true;
-        return 12;
+        return REPORT_LEN_RV;
     }
-    case SH2_LINEAR_ACCEL: {              /* [id,seq,status,delay] + x,y,z (3*2) */
-        if (avail < 10) return 0;         /* need p[0..9]: 4 hdr + 6 data bytes */
-        s_packet.accel_x = (int16_t)lroundf(rd16(&p[4]) / Q8_SCALE * 100.0f);
-        s_packet.accel_y = (int16_t)lroundf(rd16(&p[6]) / Q8_SCALE * 100.0f);
-        s_packet.accel_z = (int16_t)lroundf(rd16(&p[8]) / Q8_SCALE * 100.0f);
-        return 10;
+    case SH2_LINEAR_ACCEL: {
+        if (avail < REPORT_LEN_ACC) return 0;
+        s_packet.accel_x = (int16_t)lroundf(read_i16_le(&data[0]) / Q8_SCALE * MPS2_TO_CENTI);
+        s_packet.accel_y = (int16_t)lroundf(read_i16_le(&data[2]) / Q8_SCALE * MPS2_TO_CENTI);
+        s_packet.accel_z = (int16_t)lroundf(read_i16_le(&data[4]) / Q8_SCALE * MPS2_TO_CENTI);
+        return REPORT_LEN_ACC;
     }
     default:
         return 0;                         /* unknown id: caller advances by 1 */
@@ -250,22 +288,11 @@ void imu_source_setup(void) {
     imu_dma_rx_begin();
 #endif
 
-    /* Let the BNO086 finish emitting its post-reset SHTP advertisement before we
-     * send commands - a Set-Feature that arrives while the chip is still booting
-     * is ignored, and the reports never start. */
-    delay(200);
-
-    /* Enable the fused quaternion + gravity-free acceleration via Set-Feature.
-     * We do not wait for the command response (unreliable to catch at 3 Mbaud);
-     * the requested reports simply start streaming and our RX path decodes them.
-     * Send each twice with a gap: the first command can be missed if the chip is
-     * not yet ready, and an extra Set-Feature is harmless (idempotent). */
-    for (int attempt = 0; attempt < 2; attempt++) {
-        shtp_tx_set_feature(SH2_ROTATION_VECTOR, REPORT_INTERVAL_MS);
-        delay(5);
-        shtp_tx_set_feature(SH2_LINEAR_ACCEL,    REPORT_INTERVAL_MS);
-        delay(20);
-    }
+    /* Wait for the chip to finish booting, then enable the fused quaternion
+     * (orientation) and gravity-free acceleration reports. */
+    delay(BOOT_SETTLE_MS);
+    enable_report(SH2_ROTATION_VECTOR, REPORT_INTERVAL_MS);
+    enable_report(SH2_LINEAR_ACCEL,    REPORT_INTERVAL_MS);
 
     if (Stream *c = interface_get(IF_UART)) {
         c->println("IMU: reports enabled (RotationVector + LinearAccel)");
