@@ -2,8 +2,34 @@
 #include <Wire.h>
 #include <Servo.h>
 
-static constexpr uint8_t I2C_SLAVE_ADDRESS = 0x4C;
+// Detection-critical I2C settings with safe defaults.
+// They can be overridden from PlatformIO build_flags if needed.
+#ifndef ESC_I2C_ADDRESS
+#define ESC_I2C_ADDRESS 0x4C
+#endif
+
+#ifndef ESC_I2C_SDA_PIN
+#if defined(PIN_WIRE_SDA)
+#define ESC_I2C_SDA_PIN PIN_WIRE_SDA
+#else
+#define ESC_I2C_SDA_PIN PB11
+#endif
+#endif
+
+#ifndef ESC_I2C_SCL_PIN
+#if defined(PIN_WIRE_SCL)
+#define ESC_I2C_SCL_PIN PIN_WIRE_SCL
+#else
+#define ESC_I2C_SCL_PIN PB10
+#endif
+#endif
+
+static_assert((ESC_I2C_ADDRESS >= 0x08) && (ESC_I2C_ADDRESS <= 0x77), "ESC_I2C_ADDRESS must be a 7-bit I2C address (0x08..0x77)");
+
+static constexpr uint8_t I2C_SLAVE_ADDRESS = static_cast<uint8_t>(ESC_I2C_ADDRESS);
 static constexpr uint8_t THRUST_CMD = 0x00;
+static constexpr uint8_t I2C_SDA_PIN = ESC_I2C_SDA_PIN;
+static constexpr uint8_t I2C_SCL_PIN = ESC_I2C_SCL_PIN;
 
 static constexpr uint8_t ESC_COUNT = 8;
 static constexpr uint16_t PWM_MIN = 1100;
@@ -24,6 +50,7 @@ static constexpr uint8_t STATUS_LED_PIN = PA0;
 static constexpr size_t PACKET_SIZE = ESC_COUNT + 1;
 
 Servo esc[ESC_COUNT];
+TwoWire i2cBus(I2C_SDA_PIN, I2C_SCL_PIN);
 
 volatile uint8_t motorValues[ESC_COUNT];
 volatile uint8_t i2cRxPacket[PACKET_SIZE];
@@ -95,16 +122,16 @@ static void onI2CReceive(int bytes) {
 
     // Keep ISR short to avoid clock stretching on the I2C bus.
     if (i2cPacketReady) {
-        while (Wire.available()) {
-            Wire.read();
+        while (i2cBus.available()) {
+            i2cBus.read();
         }
         return;
     }
 
     uint8_t len = 0;
 
-    while (Wire.available()) {
-        const uint8_t b = static_cast<uint8_t>(Wire.read());
+    while (i2cBus.available()) {
+        const uint8_t b = static_cast<uint8_t>(i2cBus.read());
         if (len < PACKET_SIZE) {
             i2cRxPacket[len] = b;
         }
@@ -115,6 +142,11 @@ static void onI2CReceive(int bytes) {
         i2cRxLen = len;
         i2cPacketReady = true;
     }
+}
+
+static void onI2CRequest() {
+    // Answer read probes quickly so masters/scanners do not wait.
+    i2cBus.write(static_cast<uint8_t>(0xA5));
 }
 
 static void processI2CPacket(uint32_t now) {
@@ -150,8 +182,9 @@ void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     setStatusLed(false);
 
-    Wire.begin(I2C_SLAVE_ADDRESS);
-    Wire.onReceive(onI2CReceive);
+    i2cBus.begin(I2C_SLAVE_ADDRESS);
+    i2cBus.onReceive(onI2CReceive);
+    i2cBus.onRequest(onI2CRequest);
 
     for (uint8_t i = 0; i < ESC_COUNT; i++) {
         motorValues[i] = 128;
