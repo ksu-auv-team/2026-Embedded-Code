@@ -3,6 +3,59 @@
 #include "imu_config.h"
 #include <math.h>
 
+/* --- Circular DMA RX for the IMU UART (USART1) ----------------------------- *
+ * At the BNO08x's fixed 3 Mbaud, interrupt-per-byte RX (what the Arduino core
+ * uses) can't keep up and drops bytes mid-frame, corrupting HDLC sync. We let
+ * the DMA controller copy every received byte into a circular RAM buffer with
+ * zero CPU involvement, so no byte is ever lost. The core's HardwareSerial is
+ * still used for begin() (pin/baud/clock) and TX (Set-Feature); we just take
+ * over RX with our own DMA stream on the same USART1 instance.
+ *
+ * This is specific to IMU_SEL_USART1_PB6_PB7 / USART1; guarded accordingly. */
+#if IMU_UART_SELECT == IMU_SEL_USART1_PB6_PB7 || IMU_UART_SELECT == IMU_SEL_USART1_PA9_PA10
+  #define IMU_DMA_RX 1
+  #include "stm32g4xx_ll_dma.h"
+  #include "stm32g4xx_ll_usart.h"
+  #include "stm32g4xx_ll_bus.h"
+
+  #define IMU_DMA_BUF_SIZE 1024
+  static volatile uint8_t s_dma_buf[IMU_DMA_BUF_SIZE];
+  static size_t           s_dma_tail = 0;
+
+  static void imu_dma_rx_begin(void) {
+      /* USART1 was already configured (pins/baud) by HardwareSerial::begin().
+       * Enable DMA1 clock, point DMA1 Channel1 at USART1->RDR in circular mode,
+       * route the USART1_RX request (24) through DMAMUX, and turn on USART RX DMA. */
+      LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+      LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMAMUX1);
+
+      LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_1);
+      LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_1, LL_DMAMUX_REQ_USART1_RX);
+      LL_DMA_ConfigTransfer(DMA1, LL_DMA_CHANNEL_1,
+          LL_DMA_DIRECTION_PERIPH_TO_MEMORY |
+          LL_DMA_MODE_CIRCULAR              |
+          LL_DMA_PERIPH_NOINCREMENT         |
+          LL_DMA_MEMORY_INCREMENT           |
+          LL_DMA_PDATAALIGN_BYTE            |
+          LL_DMA_MDATAALIGN_BYTE            |
+          LL_DMA_PRIORITY_HIGH);
+      LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_1,
+          LL_USART_DMA_GetRegAddr(USART1, LL_USART_DMA_REG_DATA_RECEIVE),
+          (uint32_t)s_dma_buf,
+          LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+      LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, IMU_DMA_BUF_SIZE);
+      LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_1);
+
+      LL_USART_EnableDMAReq_RX(USART1);
+      s_dma_tail = 0;
+  }
+
+  /* Current DMA write position (head) within the circular buffer. */
+  static inline size_t imu_dma_head(void) {
+      return IMU_DMA_BUF_SIZE - LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_1);
+  }
+#endif
+
 /* Select the UART transport before pulling in the 7Semi driver: BnoSelect.h
  * uses this to pick BnoUARTBus as the bus implementation. We keep the library
  * ONLY for begin() + enableReport() (the SHTP TX / Set-Feature side, which
@@ -189,6 +242,12 @@ void imu_source_setup(void) {
     /* begin() initializes the UART (sole owner of IMU UART bring-up). */
     s_imu.begin();
 
+#if IMU_DMA_RX
+    /* Take over RX with circular DMA so no bytes drop at 3 Mbaud. Must run after
+     * HardwareSerial::begin() has configured USART1 pins/baud/clock. */
+    imu_dma_rx_begin();
+#endif
+
     /* Enable the fused quaternion + gravity-free acceleration. The library's
      * Set-Feature WRITE works; we ignore its response ack (which is unreliable
      * at 3 Mbaud) and rely on the reports actually streaming. */
@@ -205,11 +264,22 @@ void imu_source_update(void) {
      * deframer; each complete frame is parsed inline (parse_shtp_frame), which
      * fills s_packet and sets s_has_packet. Cap the per-call byte count so a
      * flooded FIFO can't starve loop(); leftover bytes are read next tick. */
+#if IMU_DMA_RX
+    /* Consume all bytes the DMA has written since last time, in order, through
+     * the deframer. The DMA never drops a byte, so frames arrive intact. */
+    size_t head = imu_dma_head();
+    while (s_dma_tail != head) {
+        deframe_byte(s_dma_buf[s_dma_tail]);
+        s_dma_tail = (s_dma_tail + 1) & (IMU_DMA_BUF_SIZE - 1);
+        head = imu_dma_head();   /* re-read: more may have arrived while parsing */
+    }
+#else
     HardwareSerial &imu = imu_hardware_serial();
     int budget = 512;
     while (imu.available() && budget-- > 0) {
         deframe_byte((uint8_t)imu.read());
     }
+#endif
 
     /* DIAGNOSTIC: single cheap 1 Hz line - frames seen, max frame length, and
      * RV packets parsed. Tells us if frames are full-length (>=18) and whether
