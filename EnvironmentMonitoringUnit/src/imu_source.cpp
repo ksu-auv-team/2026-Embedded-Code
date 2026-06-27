@@ -56,24 +56,10 @@
   }
 #endif
 
-/* Select the UART transport before pulling in the 7Semi driver: BnoSelect.h
- * uses this to pick BnoUARTBus as the bus implementation. We keep the library
- * ONLY for begin() + enableReport() (the SHTP TX / Set-Feature side, which
- * works). All RX deframing AND report parsing is done locally below, because
- * the library's BnoUARTBus::rx() can't deframe a continuous 3 Mbaud stream
- * (it bails on the first non-0x7E byte) and its processPacket() assumes a
- * fixed header offset our stream doesn't reliably match. */
-#define BNO_USE_UART
-#include <7Semi_BNO08x.h>
-
-/* UART transport on the IMU HardwareSerial.
- *   rstPin  = -1: bno086_begin() owns reset + BOOTN/CLKSEL0 strapping.
- *   intnPin = -1: H_INTN (PB5) is not wired; do not gate on it.
- *   rxPin/txPin = -1: pins come from the HardwareSerial construction (STM32). */
-static BnoUARTBus  s_bus(imu_hardware_serial(), IMU_BAUD_RATE,
-                         /*rxPin*/ -1, /*txPin*/ -1,
-                         /*intnPin*/ -1, /*rstPin*/ -1);
-static BNO08x_7Semi s_imu(s_bus);
+/* This module talks to the BNO086 over UART-SHTP directly - no external driver
+ * library. The 7Semi BNO08x library was dropped because its UART transport
+ * (BnoUARTBus::rx) can't deframe a continuous 3 Mbaud stream, and the rest of
+ * what it offered (Set-Feature TX, report parsing) is small and inlined here. */
 
 /* Report rate: 10 ms => 100 Hz, matching the old UART-RVC stream rate. */
 static const uint32_t REPORT_INTERVAL_MS = 10;
@@ -81,19 +67,62 @@ static const uint32_t REPORT_INTERVAL_MS = 10;
 static bool      s_has_packet;
 static ImuPacket s_packet;
 
-/* --- SH-2 / SHTP report ids and fixed-point scales (from the BNO08x datasheet) */
+/* --- SHTP / SH-2 protocol constants (BNO08x datasheet) --- */
+#define SHTP_CH_CONTROL     2      /* control channel (Set-Feature commands)   */
+#define SH2_CMD_SET_FEATURE 0xFD   /* Set Feature Command report id            */
 #define SH2_TIMEBASE_REF    0xFB   /* Base Timestamp Reference report          */
 #define SH2_LINEAR_ACCEL    0x04   /* Linear acceleration, m/s^2, Q8           */
 #define SH2_ROTATION_VECTOR 0x05   /* Rotation vector quaternion, unitless, Q14 */
 #define Q8_SCALE   256.0f
 #define Q14_SCALE  16384.0f
 
+/* HDLC framing for UART-SHTP: 0x7E flags, 0x7D escape (byte ^ 0x20). */
+#define HDLC_FLAG 0x7E
+#define HDLC_ESC  0x7D
+#define SHTP_PID  0x01
+
 static inline int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
 
-/* --- Custom HDLC deframer + SHTP report parser ----------------------------- *
- * Read the IMU UART byte-by-byte, RESYNC on 0x7E (the resync the library's
- * rx() lacked), unescape 0x7D, strip the protocol-id byte, then parse the
- * resulting SHTP frame ourselves.
+/* --- SHTP transmit (Set Feature) ------------------------------------------- *
+ * Build a 21-byte SHTP Set-Feature command on the control channel and send it
+ * HDLC-wrapped over the IMU UART. We do NOT wait for the command response (it
+ * is unreliable to catch at 3 Mbaud); the requested report simply starts
+ * streaming, which our RX path then decodes. */
+static uint8_t s_ctrl_seq = 0;
+
+static void shtp_tx_set_feature(uint8_t report_id, uint32_t interval_ms) {
+    const uint32_t us = interval_ms * 1000UL;
+    uint8_t f[21] = {0};
+    f[0] = sizeof(f) & 0xFF;          /* SHTP length LSB (incl. 4-byte header)  */
+    f[1] = sizeof(f) >> 8;            /* SHTP length MSB                        */
+    f[2] = SHTP_CH_CONTROL;           /* channel                                */
+    f[3] = s_ctrl_seq++;              /* sequence                               */
+    f[4] = SH2_CMD_SET_FEATURE;       /* 0xFD Set Feature                       */
+    f[5] = report_id;                 /* feature / report id                    */
+    /* f[6..8] = flags + change sensitivity (0) */
+    f[9]  =  us        & 0xFF;        /* report interval (us), LE               */
+    f[10] = (us >> 8)  & 0xFF;
+    f[11] = (us >> 16) & 0xFF;
+    f[12] = (us >> 24) & 0xFF;
+    /* f[13..20] = batch interval + reserved (0) */
+
+    HardwareSerial &s = imu_hardware_serial();
+    s.write(HDLC_FLAG);
+    s.write(SHTP_PID);
+    for (size_t i = 0; i < sizeof(f); i++) {
+        uint8_t b = f[i];
+        if (b == HDLC_FLAG || b == HDLC_ESC) { s.write(HDLC_ESC); s.write((uint8_t)(b ^ 0x20)); }
+        else                                 { s.write(b); }
+    }
+    s.write(HDLC_FLAG);
+    s.flush();
+}
+
+/* --- HDLC deframer + SHTP report parser ------------------------------------ *
+ * Process the IMU UART byte-by-byte: RESYNC on 0x7E, unescape 0x7D, strip the
+ * protocol-id byte, then parse the resulting SHTP frame. Resyncing on every
+ * flag (rather than bailing on the first non-flag byte) is what makes this work
+ * on the BNO's continuous 3 Mbaud stream.
  *
  * SHTP-over-UART frame after deframing (protocol-id stripped):
  *   [0..1] length (LSB,MSB, includes the 4-byte header)
@@ -106,10 +135,6 @@ static inline int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 
  * byte), we SCAN the cargo for the 0xFB timebase marker and parse the sensor
  * report that follows it; if no timebase is present we scan from the header
  * end. This tolerates the minor framing jitter seen on the wire. */
-
-#define HDLC_FLAG 0x7E
-#define HDLC_ESC  0x7D
-#define SHTP_PID  0x01
 
 static const size_t SHTP_FRAME_MAX = 128;
 
@@ -215,20 +240,21 @@ static void deframe_byte(uint8_t b) {
 void imu_source_setup(void) {
     s_has_packet = false;
 
-    /* begin() initializes the UART (sole owner of IMU UART bring-up). */
-    s_imu.begin();
+    /* Bring up the IMU UART (pins/baud/clock). This module is the sole owner of
+     * the IMU UART; interfaces_begin() intentionally does not begin() it. */
+    imu_hardware_serial().begin(IMU_BAUD_RATE);
 
 #if IMU_DMA_RX
     /* Take over RX with circular DMA so no bytes drop at 3 Mbaud. Must run after
-     * HardwareSerial::begin() has configured USART1 pins/baud/clock. */
+     * the UART begin() above has configured USART1 pins/baud/clock. */
     imu_dma_rx_begin();
 #endif
 
-    /* Enable the fused quaternion + gravity-free acceleration. The library's
-     * Set-Feature WRITE works; we ignore its response ack (which is unreliable
-     * at 3 Mbaud) and rely on the reports actually streaming. */
-    s_imu.enableRotationVector(REPORT_INTERVAL_MS);
-    s_imu.enableLinearAccel(REPORT_INTERVAL_MS);
+    /* Enable the fused quaternion + gravity-free acceleration via Set-Feature.
+     * We do not wait for the command response (unreliable to catch at 3 Mbaud);
+     * the requested reports simply start streaming and our RX path decodes them. */
+    shtp_tx_set_feature(SH2_ROTATION_VECTOR, REPORT_INTERVAL_MS);
+    shtp_tx_set_feature(SH2_LINEAR_ACCEL,    REPORT_INTERVAL_MS);
 
     if (Stream *c = interface_get(IF_UART)) {
         c->println("IMU: reports enabled (RotationVector + LinearAccel)");
