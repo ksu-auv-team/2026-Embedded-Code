@@ -10,12 +10,11 @@
 
 /* --- Timing (from CEVA sh2 reference HAL) --- */
 #define BNO_RESET_LOW_MS     12     /* hold NRST low >=10 ms                */
-#define BNO_BOOT_SETTLE_MS   100    /* settle after reset before the driver talks */
 
 /* The debug console we print bring-up status to. */
 static Stream *console(void) { return interface_get(IF_UART); }
 
-void bno086_begin(void) {
+void bno086_reset(void) {
     Stream *c = console();
 
     /* --- Physical bring-up ONLY: reset + strapping --- *
@@ -48,9 +47,8 @@ void bno086_begin(void) {
     delay(BNO_RESET_LOW_MS);
     digitalWrite(BNO_NRST_PIN, HIGH);      /* release reset; straps sampled now */
 
-    /* Give the device a moment to come out of reset before the driver begins
-     * talking to it. Do NOT read the UART here (see note above). */
-    delay(BNO_BOOT_SETTLE_MS);
-
+    /* The post-reset settle (waiting for the boot advertisement before sending
+     * commands) is owned by imu_source_setup(), the code that actually talks to
+     * the chip - see BOOT_SETTLE_MS there. Do NOT read the UART here. */
     if (c) c->println("BNO086: reset + strapped (UART owned by imu_source)");
 }

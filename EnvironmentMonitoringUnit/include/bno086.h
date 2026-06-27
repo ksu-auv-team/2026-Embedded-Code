@@ -18,9 +18,9 @@
  * and sensor reports - is handled by the imu_source driver; see imu_source.h.
  */
 
-/** Reset the BNO086 with the correct strapping and wait for it to signal ready
- *  on H_INTN. Blocking, with a timeout; call once from setup() AFTER
- *  interfaces_begin() and BEFORE imu_source_setup(). */
-void bno086_begin(void);
+/** Reset and strap the BNO086 (NRST pulse with BOOTN/CLKSEL0 driven for
+ *  UART-SHTP). Call once from setup() AFTER interfaces_begin() and BEFORE
+ *  imu_source_setup(); the latter owns the UART and the post-reset settle. */
+void bno086_reset(void);
 
 #endif // BNO086_H

@@ -42,7 +42,7 @@ void setup() {
     debug_tx_setup();
 
     /* Reset + strap the IMU before imu_source starts talking SHTP to it. */
-    bno086_begin();
+    bno086_reset();
 
     imu_source_setup();
     data_publisher_setup();
