@@ -3,8 +3,8 @@ Collection of our Embedded Code
 
 # I2C Addresses
 
-| # | Address | Device Name | Data |
-|-------|:---:|------------|------|
+| # | Address | Device Name |
+|-------|:---:|------------|
 | 1 | 4a | Power Safety |
 | 2 | 4b | IMU |
 | 3 | 4c | ESC Controller |
