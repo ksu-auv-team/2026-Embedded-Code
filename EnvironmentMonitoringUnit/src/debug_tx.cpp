@@ -1,5 +1,4 @@
 #include "debug_tx.h"
-#include "led_indicator.h"
 #include "interfaces.h"
 #include "config.h"
 
@@ -35,9 +34,6 @@ void debug_tx_update(void) {
 
     /* Transmit the current counter value to the configured destination(s). */
     heartbeat_print(nullptr);
-
-    /* Flash the LED to show a transmission happened. */
-    led_pulse();
 
     /* Advance the counter, wrapping at COUNTER_MAX. */
     if (counter >= COUNTER_MAX) {

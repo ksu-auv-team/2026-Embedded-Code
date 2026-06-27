@@ -1,6 +1,7 @@
 #include "data_publisher.h"
 #include "config.h"
 #include "interfaces.h"
+#include "led_indicator.h"
 #include <Wire.h>
 
 /* I2C SLAVE: the STM32 responds at I2C_SLAVE_ADDR; an external host (master)
@@ -19,6 +20,7 @@ static volatile uint8_t s_active = 0;
 static void on_request(void) {
     uint8_t idx = s_active;     /* read once: producer may flip concurrently */
     i2c_slave.write(reinterpret_cast<const uint8_t *>(&s_buf[idx]), sizeof(s_buf[idx]));
+    led_pulse();                /* flash the LED on each host read of our data */
 }
 
 void data_publisher_setup(void) {
