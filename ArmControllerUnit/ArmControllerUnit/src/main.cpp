@@ -3,8 +3,8 @@
 #include <Servo.h>
 
 static constexpr uint8_t I2C_ADDRESS = 0x4D;
-static constexpr uint8_t PIN_SDA = PA8;
-static constexpr uint8_t PIN_SCL = PA9;
+static constexpr uint8_t PIN_SDA = PIN_WIRE_SDA;
+static constexpr uint8_t PIN_SCL = PIN_WIRE_SCL;
 
 static constexpr uint8_t PIN_PWM1 = PA5;
 static constexpr uint8_t PIN_PWM2 = PA1;
@@ -20,7 +20,11 @@ static constexpr uint8_t PACKET_SIZE = NUM_SERVOS + 1;
 static constexpr uint32_t LED_BLINK_INTERVAL_MS = 120;
 
 Servo servos[NUM_SERVOS];
+TwoWire i2cBus(PIN_SDA, PIN_SCL);
 volatile bool blinkRequest = false;
+volatile bool packetReady = false;
+volatile uint8_t rxPacket[PACKET_SIZE];
+volatile uint8_t rxLength = 0;
 
 uint8_t blinkTogglesRemaining = 0;
 bool signalLedState = false;
@@ -37,25 +41,56 @@ static inline uint16_t toMicroseconds(uint8_t value) {
 void onReceive(int bytes) {
   (void)bytes;
 
-  uint8_t buf[PACKET_SIZE];
   uint8_t len = 0;
 
-  while (Wire.available() && len < PACKET_SIZE) {
-    buf[len++] = static_cast<uint8_t>(Wire.read());
-  }
-  while (Wire.available()) {
-    Wire.read();
+  if (bytes > 0) {
+    blinkRequest = true;
   }
 
-  if (len != PACKET_SIZE || buf[0] != REGISTER_THRUST) {
+  if (packetReady) {
+    while (i2cBus.available()) {
+      i2cBus.read();
+    }
+    return;
+  }
+
+  while (i2cBus.available() && len < PACKET_SIZE) {
+    rxPacket[len++] = static_cast<uint8_t>(i2cBus.read());
+  }
+  while (i2cBus.available()) {
+    i2cBus.read();
+  }
+
+  if (len == PACKET_SIZE) {
+    rxLength = len;
+    packetReady = true;
+  }
+}
+
+static void processI2CPacket() {
+  if (!packetReady) {
+    return;
+  }
+
+  uint8_t packet[PACKET_SIZE];
+  uint8_t len = 0;
+
+  noInterrupts();
+  len = rxLength;
+  for (uint8_t i = 0; i < PACKET_SIZE; i++) {
+    packet[i] = rxPacket[i];
+  }
+  packetReady = false;
+  interrupts();
+
+  if (len != PACKET_SIZE || packet[0] != REGISTER_THRUST) {
     return;
   }
 
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
-    servos[i].writeMicroseconds(toMicroseconds(buf[i + 1]));
+    servos[i].writeMicroseconds(toMicroseconds(packet[i + 1]));
   }
 
-  blinkRequest = true;
 }
 
 static void updateSignalBlink(uint32_t now) {
@@ -81,11 +116,8 @@ void setup() {
   pinMode(PIN_SIGNAL, OUTPUT);
   digitalWrite(PIN_SIGNAL, LOW);
 
-  Wire.setSDA(PIN_SDA);
-  Wire.setSCL(PIN_SCL);
-
-  Wire.begin(I2C_ADDRESS);
-  Wire.onReceive(onReceive);
+  i2cBus.begin(I2C_ADDRESS);
+  i2cBus.onReceive(onReceive);
 
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
     servos[i].attach(SERVO_PINS[i]);
@@ -94,6 +126,6 @@ void setup() {
 }
 
 void loop() {
+  processI2CPacket();
   updateSignalBlink(millis());
-  delay(10);
 }
