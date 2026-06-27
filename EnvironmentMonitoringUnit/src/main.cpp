@@ -35,6 +35,7 @@ void setup() {
 #endif
 
     led_setup();
+    led_startup_blink();         // power-up blink burst: board booted, LED works
     router_setup();
 
     /* Bring up the debug heartbeat FIRST, so the VCP proves alive before the
@@ -46,6 +47,17 @@ void setup() {
 
     imu_source_setup();
     data_publisher_setup();
+
+    /* Confirm the IMU is actually streaming: pump the reader briefly, and if a
+     * packet arrives, hold the LED solid for a second as a boot-OK indicator. */
+    uint32_t confirm_start = millis();
+    bool imu_ok = false;
+    ImuPacket boot_pkt;
+    while (millis() - confirm_start < IMU_BOOT_CONFIRM_TIMEOUT_MS) {
+        imu_source_update();
+        if (imu_source_get(boot_pkt)) { imu_ok = true; break; }
+    }
+    if (imu_ok) led_solid(LED_STARTUP_SOLID_MS);
 }
 
 void loop() {

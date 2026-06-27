@@ -132,10 +132,23 @@ enum InterfaceId {
  * 6. LED INDICATOR (feature toggle)
  *
  * Set ENABLE_LED to 0 to compile the LED feature out entirely.
+ *
+ * Boot sequence: a rapid blink burst (LED_STARTUP_BLINKS x LED_STARTUP_BLINK_MS)
+ * confirms the board powered up, then the LED stays solid for
+ * LED_STARTUP_SOLID_MS if IMU data is being received. In normal operation the
+ * LED pulses (LED_PULSE_MS) on each I2C read from the host.
  * ========================================================================= */
 #define ENABLE_LED 1
 #define LED_PIN PA0
 #define LED_PULSE_MS 100
+
+#define LED_STARTUP_BLINKS    4    /* number of power-up blinks               */
+#define LED_STARTUP_BLINK_MS  80   /* on/off half-period of each blink (ms)   */
+#define LED_STARTUP_SOLID_MS  1000 /* solid-on duration once IMU data confirmed */
+
+/* Max time to wait at boot for the first IMU packet before giving up on the
+ * solid-on confirmation (the LED then just stays off until I2C reads occur). */
+#define IMU_BOOT_CONFIRM_TIMEOUT_MS 1500
 
 /* ===========================================================================
  * 7. I2C SLAVE (IMU data output)
