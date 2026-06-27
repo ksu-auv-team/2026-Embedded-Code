@@ -28,8 +28,6 @@ static const uint32_t REPORT_INTERVAL_MS = 10;
 static bool      s_has_packet;
 static ImuPacket s_packet;
 
-uint32_t g_rv_count = 0;   /* DIAGNOSTIC: parsed Rotation Vector reports */
-
 /* --- SH-2 / SHTP report ids and fixed-point scales (from the BNO08x datasheet) */
 #define SH2_TIMEBASE_REF    0xFB   /* Base Timestamp Reference report          */
 #define SH2_LINEAR_ACCEL    0x04   /* Linear acceleration, m/s^2, Q8           */
@@ -73,8 +71,8 @@ static bool     s_got_pid   = false;
 static size_t parse_report(const uint8_t *p, size_t avail) {
     if (avail < 1) return 0;
     switch (p[0]) {
-    case SH2_ROTATION_VECTOR: {           /* 4 + i,j,k,r (4*2) + accuracy(2) */
-        if (avail < 14) return 0;
+    case SH2_ROTATION_VECTOR: {           /* [id,seq,status,delay] + i,j,k,r (4*2) */
+        if (avail < 12) return 0;         /* need p[0..11]: 4 hdr + 8 quat bytes */
         float i = rd16(&p[4])  / Q14_SCALE;
         float j = rd16(&p[6])  / Q14_SCALE;
         float k = rd16(&p[8])  / Q14_SCALE;
@@ -91,12 +89,11 @@ static size_t parse_report(const uint8_t *p, size_t avail) {
         s_packet.roll  = (int16_t)lroundf(roll  * C);
         s_packet.index++;
         s_has_packet = true;
-        /* DIAGNOSTIC: confirm RV reports are being parsed (rate-limited). */
-        extern uint32_t g_rv_count; g_rv_count++;
-        return 14;
+        extern uint32_t g_packet_count; g_packet_count++;
+        return 12;
     }
-    case SH2_LINEAR_ACCEL: {              /* 4 + x,y,z (3*2) */
-        if (avail < 10) return 0;
+    case SH2_LINEAR_ACCEL: {              /* [id,seq,status,delay] + x,y,z (3*2) */
+        if (avail < 10) return 0;         /* need p[0..9]: 4 hdr + 6 data bytes */
         s_packet.accel_x = (int16_t)lroundf(rd16(&p[4]) / Q8_SCALE * 100.0f);
         s_packet.accel_y = (int16_t)lroundf(rd16(&p[6]) / Q8_SCALE * 100.0f);
         s_packet.accel_z = (int16_t)lroundf(rd16(&p[8]) / Q8_SCALE * 100.0f);
@@ -136,28 +133,29 @@ static void parse_shtp_frame(const uint8_t *f, size_t n) {
     }
 }
 
-/* DIAGNOSTIC: dump the first N complete deframed frames in full, as hex, to the
- * VCP so the exact SHTP-over-UART byte layout can be analyzed offline. */
-#define DUMP_FRAMES 200
-static uint32_t s_dump_count = 0;
-static void dump_frame(const uint8_t *f, size_t n) {
-    if (s_dump_count >= DUMP_FRAMES) return;
-    s_dump_count++;
-    Stream *c = interface_get(IF_UART);
-    if (!c) return;
-    c->print("F["); c->print(n); c->print("]:");
-    for (size_t i = 0; i < n; i++) {
-        c->print(' ');
-        if (f[i] < 16) c->print('0');
-        c->print(f[i], HEX);
-    }
-    c->println();
-}
+/* DIAGNOSTIC (cheap, no per-frame printing): track frame stats for a 1 Hz report. */
+uint32_t g_frame_count = 0;
+uint32_t g_packet_count = 0;
+uint8_t  g_max_len = 0;
+
+/* DIAGNOSTIC: RAM recorder - store raw frames WITHOUT printing (non-blocking),
+ * so capture doesn't corrupt the 3 Mbaud stream. Flushed once by imu_source. */
+#define REC_MAX 40
+uint8_t  g_rec[REC_MAX][32];
+uint8_t  g_rec_len[REC_MAX];
+uint32_t g_rec_count = 0;
 
 static void deframe_byte(uint8_t b) {
     if (b == HDLC_FLAG) {
         if (s_in_frame && s_got_pid && s_frame_len >= 5) {
-            dump_frame(s_frame, s_frame_len);
+            g_frame_count++;
+            if (s_frame_len > g_max_len) g_max_len = (uint8_t)s_frame_len;
+            if (g_rec_count < REC_MAX) {
+                uint8_t cl = s_frame_len < 32 ? (uint8_t)s_frame_len : 32;
+                for (uint8_t z = 0; z < cl; z++) g_rec[g_rec_count][z] = s_frame[z];
+                g_rec_len[g_rec_count] = cl;
+                g_rec_count++;
+            }
             parse_shtp_frame(s_frame, s_frame_len);
         }
         s_in_frame  = true;
@@ -213,14 +211,36 @@ void imu_source_update(void) {
         deframe_byte((uint8_t)imu.read());
     }
 
-    /* DIAGNOSTIC: 1 Hz report of how many RV reports we've parsed. */
+    /* DIAGNOSTIC: single cheap 1 Hz line - frames seen, max frame length, and
+     * RV packets parsed. Tells us if frames are full-length (>=18) and whether
+     * the parser is producing packets. */
+    extern uint32_t g_frame_count, g_packet_count; extern uint8_t g_max_len;
+    extern uint8_t g_rec[][32]; extern uint8_t g_rec_len[]; extern uint32_t g_rec_count;
+    static bool flushed = false;
     static uint32_t last_ms = 0;
     uint32_t now = millis();
     if (now - last_ms >= 1000) {
         last_ms = now;
-        if (Stream *c = interface_get(IF_UART)) {
-            c->print("IMU diag: rv_parsed="); c->println(g_rv_count);
+        Stream *c = interface_get(IF_UART);
+        if (c) {
+            c->print("IMU diag: frames="); c->print(g_frame_count);
+            c->print(" maxlen="); c->print(g_max_len);
+            c->print(" rv_packets="); c->println(g_packet_count);
+            /* One-shot raw-frame flush once the RAM recorder is full. */
+            if (!flushed && g_rec_count >= REC_MAX) {
+                flushed = true;
+                for (uint32_t r = 0; r < g_rec_count; r++) {
+                    c->print("R["); c->print(g_rec_len[r]); c->print("]:");
+                    for (uint8_t z = 0; z < g_rec_len[r]; z++) {
+                        c->print(' ');
+                        if (g_rec[r][z] < 16) c->print('0');
+                        c->print(g_rec[r][z], HEX);
+                    }
+                    c->println();
+                }
+            }
         }
+        g_max_len = 0;
     }
 }
 
