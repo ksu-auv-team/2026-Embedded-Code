@@ -26,6 +26,9 @@ static constexpr size_t PACKET_SIZE = ESC_COUNT + 1;
 Servo esc[ESC_COUNT];
 
 volatile uint8_t motorValues[ESC_COUNT];
+volatile uint8_t i2cRxPacket[PACKET_SIZE];
+volatile uint8_t i2cRxLen = 0;
+volatile bool i2cPacketReady = false;
 
 volatile bool newData = false;
 volatile bool packetFlashRequest = false;
@@ -34,6 +37,7 @@ volatile uint32_t lastReceiveTime = 0;
 uint32_t statusLedLastToggleTime = 0;
 uint8_t packetFlashTogglesRemaining = 0;
 bool statusLedState = false;
+uint32_t lastControlTick = 0;
 
 static inline uint16_t mapPwm(uint8_t value) {
     return static_cast<uint16_t>((static_cast<uint32_t>(value) * (PWM_MAX - PWM_MIN)) / 255U + PWM_MIN);
@@ -89,26 +93,57 @@ static void onI2CReceive(int bytes) {
         return;
     }
 
-    uint8_t buf[PACKET_SIZE];
+    // Keep ISR short to avoid clock stretching on the I2C bus.
+    if (i2cPacketReady) {
+        while (Wire.available()) {
+            Wire.read();
+        }
+        return;
+    }
+
     uint8_t len = 0;
 
-    while (Wire.available() && len < PACKET_SIZE) {
-        buf[len++] = static_cast<uint8_t>(Wire.read());
-    }
     while (Wire.available()) {
-        Wire.read();
+        const uint8_t b = static_cast<uint8_t>(Wire.read());
+        if (len < PACKET_SIZE) {
+            i2cRxPacket[len] = b;
+        }
+        len++;
     }
 
-    if (len != PACKET_SIZE || buf[0] != THRUST_CMD) {
+    if (len == PACKET_SIZE) {
+        i2cRxLen = len;
+        i2cPacketReady = true;
+    }
+}
+
+static void processI2CPacket(uint32_t now) {
+    if (!i2cPacketReady) {
+        return;
+    }
+
+    uint8_t packet[PACKET_SIZE];
+    uint8_t len = 0;
+
+    noInterrupts();
+    len = i2cRxLen;
+    for (uint8_t i = 0; i < PACKET_SIZE; i++) {
+        packet[i] = i2cRxPacket[i];
+    }
+    i2cPacketReady = false;
+    interrupts();
+
+    if (len != PACKET_SIZE || packet[0] != THRUST_CMD) {
         return;
     }
 
     for (uint8_t i = 0; i < ESC_COUNT; i++) {
-        motorValues[i] = buf[i + 1];
+        motorValues[i] = packet[i + 1];
     }
 
     newData = true;
     packetFlashRequest = true;
+    lastReceiveTime = now;
 }
 
 void setup() {
@@ -131,14 +166,18 @@ void setup() {
 void loop() {
     const uint32_t now = millis();
 
-    if ((now - lastReceiveTime) > LINK_TIMEOUT_MS) {
-        setEscFailsafe();
-    } else if (newData) {
-        updateEscOutputs();
-        lastReceiveTime = now;
-        newData = false;
-    }
+    processI2CPacket(now);
 
-    updateStatusLed(now);
-    delay(LOOP_DELAY_MS);
+    if ((now - lastControlTick) >= LOOP_DELAY_MS) {
+        lastControlTick = now;
+
+        if ((now - lastReceiveTime) > LINK_TIMEOUT_MS) {
+            setEscFailsafe();
+        } else if (newData) {
+            updateEscOutputs();
+            newData = false;
+        }
+
+        updateStatusLed(now);
+    }
 }
