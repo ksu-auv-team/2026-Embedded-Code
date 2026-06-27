@@ -2,7 +2,7 @@
 #define BNO086_H
 
 /**
- * BNO086 IMU bring-up and "get basic info" over UART-SHTP.
+ * BNO086 physical bring-up (reset + strapping).
  *
  * Control pins (this board):
  *   NRST    -> PB4    reset, active low (held low >=10 ms to reset)
@@ -11,18 +11,17 @@
  *   CLKSEL0 -> PA15   clock select; HIGH = external clock on the CLK pin
  *
  * BOOTN and CLKSEL0 are strapping pins sampled at the rising edge of reset, so
- * they are driven before NRST is released.
+ * they are driven before NRST is released. (PS0/PS1 are board-fixed for
+ * UART-SHTP.)
  *
- * Data path is the IMU UART (IF_IMU). The device must be strapped for
- * UART-SHTP mode (PS0/PS1) for the Product ID Request to work.
- *
- * bno086_begin() resets the device, waits for it to signal ready on H_INTN,
- * sends an SHTP Product ID Request, parses the Product ID Response, and prints
- * the decoded firmware/part/build info to the debug console (IF_UART).
+ * This module only resets the chip and waits for it to signal ready on H_INTN.
+ * All SHTP traffic - Product ID, Set Feature, and sensor reports - is handled
+ * by the 7Semi BNO08x library; see imu_source.h.
  */
 
-/** Reset the BNO086, query its product ID, and print decoded info. Blocking,
- *  with timeouts; safe to call once from setup() after interfaces_begin(). */
+/** Reset the BNO086 with the correct strapping and wait for it to signal ready
+ *  on H_INTN. Blocking, with a timeout; call once from setup() AFTER
+ *  interfaces_begin() and BEFORE imu_source_setup(). */
 void bno086_begin(void);
 
 #endif // BNO086_H

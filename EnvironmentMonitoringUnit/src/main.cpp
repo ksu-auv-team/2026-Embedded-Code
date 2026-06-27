@@ -5,7 +5,7 @@
 #include "debug_tx.h"
 #include "router.h"
 #include "bno086.h"
-#include "imu_reader.h"
+#include "imu_source.h"
 #include "data_publisher.h"
 
 /**
@@ -17,7 +17,7 @@
  *   IF_IMU  - IMU UART            (USART1 PB6/PB7, permanently attached IMU)
  *
  * Data flow:
- *   BNO086 -> IF_IMU -> imu_reader (parse RVC frames) -> data_publisher
+ *   BNO086 -> IF_IMU -> imu_source (7Semi BNO08x lib, UART-SHTP) -> data_publisher
  *     data_publisher -> USB serial monitor  (if host connected)
  *     data_publisher -> I2C output bus      (always, see config.h section 7)
  */
@@ -37,24 +37,26 @@ void setup() {
     led_setup();
     router_setup();
 
-    /* Reset the IMU and print its product ID before starting the heartbeat. */
+    /* Bring up the debug heartbeat FIRST, so the VCP proves alive before the
+     * (riskier) IMU bring-up. If IMU init ever hangs, the heartbeat still ran. */
+    debug_tx_setup();
+
+    /* Reset + strap the IMU before the library starts talking SHTP to it. */
     bno086_begin();
 
-    imu_reader_setup();
+    imu_source_setup();
     data_publisher_setup();
-
-    debug_tx_setup();
 }
 
 void loop() {
     debug_tx_update();           // heartbeat to configured interface(s)
     router_update();             // echo interfaces per the routing table
 
-    imu_reader_update();         // parse incoming RVC bytes from BNO086
+    imu_source_update();         // read+decode SHTP reports from BNO086
 
     ImuPacket pkt;
-    if (imu_reader_get(pkt)) {
-        data_publisher_publish(pkt); // -> USB (if connected) + I2C (always)
+    if (imu_source_get(pkt)) {
+        data_publisher_publish(pkt); // -> VCP line + I2C (always)
     }
 
     led_update();                // turn LED off when its pulse elapses

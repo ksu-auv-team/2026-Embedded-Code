@@ -31,11 +31,18 @@ static HardwareSerial uart_imu(PB4, PB3);                // USART2
 
 void interfaces_begin(void) {
     uart_debug.begin(BAUD_RATE);
-    uart_imu.begin(IMU_BAUD_RATE);
+    /* NOTE: the IMU UART is NOT begun here. It is owned by the 7Semi BNO08x
+     * UART bus (see imu_source.cpp), which calls uart_imu.begin(IMU_BAUD_RATE)
+     * from imu_source_setup(). Keeping a single owner avoids begin()-ing the
+     * same USART twice at potentially different rates. */
 
 #if USB_AVAILABLE
     USB_SERIAL.begin();  /* baud ignored by native USB */
 #endif
+}
+
+HardwareSerial &imu_hardware_serial(void) {
+    return uart_imu;
 }
 
 Stream *interface_get(InterfaceId id) {

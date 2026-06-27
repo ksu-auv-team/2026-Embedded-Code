@@ -16,33 +16,23 @@
 /* ---------------------------------------------------------------------------
  * 1. UART MODE
  *
- * The BNO086 supports two UART protocols, strapped on the board via PS0/PS1.
- * This MUST match how your board is strapped.
+ * The BNO086 is strapped (PS0/PS1) for UART-SHTP - full Sensor Hub Transport
+ * Protocol, bidirectional, with a command channel. This is the only mode
+ * supported by the firmware: the IMU is driven through the 7Semi BNO08x
+ * library (BnoUARTBus), which speaks SHTP wrapped in RFC1662/HDLC framing.
  *
- *   IMU_MODE_SHTP - full Sensor Hub Transport Protocol. Bidirectional;
- *                   supports the "get info" Product ID Request. Runs at 3 Mbaud.
- *   IMU_MODE_RVC  - UART-RVC: one-way 100 Hz streaming of heading/accel only,
- *                   no command channel. Runs at 115200 baud.
+ * (The legacy one-way UART-RVC path and its hand-rolled parser were removed
+ * when the driver switched to the 7Semi library.)
  * ------------------------------------------------------------------------- */
-#define IMU_MODE_SHTP 0
-#define IMU_MODE_RVC  1
-
-#define IMU_USART_MODE IMU_MODE_RVC
 
 /* ---------------------------------------------------------------------------
  * 2. BAUD RATE
  *
- * The two modes have different fixed baud rates, so by default the baud is
- * derived from IMU_USART_MODE. To force a specific value (e.g. a board that
- * reconfigures the SHTP baud), define IMU_BAUD_RATE before this block.
- *   UART-SHTP -> 3,000,000   UART-RVC -> 115,200
+ * UART-SHTP on this board is strapped for 3 Mbaud. Override by defining
+ * IMU_BAUD_RATE before including this header if your module differs.
  * ------------------------------------------------------------------------- */
 #ifndef IMU_BAUD_RATE
-  #if IMU_USART_MODE == IMU_MODE_SHTP
-    #define IMU_BAUD_RATE 3000000
-  #else
-    #define IMU_BAUD_RATE 115200
-  #endif
+  #define IMU_BAUD_RATE 3000000
 #endif
 
 /* ---------------------------------------------------------------------------

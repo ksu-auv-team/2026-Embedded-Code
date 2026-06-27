@@ -5,8 +5,8 @@
 
 /* Publish a parsed IMU frame to configured outputs.
  *
- *   - USB serial monitor: human-readable CSV line, sent only when USB host
- *     is connected (operator bool() on SerialUSB).
+ *   - Debug VCP (IF_UART): human-readable CSV line (native USB is unused on
+ *     this board).
  *   - I2C output bus: raw ImuPacket struct, always sent to I2C_OUT_ADDR
  *     (configured in config.h section 7).
  *

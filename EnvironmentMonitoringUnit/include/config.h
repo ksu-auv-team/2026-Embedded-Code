@@ -71,7 +71,7 @@ enum InterfaceId {
 #define SYSCLK_128MHZ 128000000UL
 #define SYSCLK_64MHZ   64000000UL
 
-#define SYSCLK_HZ SYSCLK_170MHZ
+#define SYSCLK_HZ SYSCLK_144MHZ
 
 /* ===========================================================================
  * 2. DEBUG UART SELECTION (the physical USART used for IF_UART)
@@ -121,7 +121,9 @@ enum InterfaceId {
  * Leave it empty to disable the heartbeat:
  *   #define HEARTBEAT_DESTINATIONS  // (nothing)
  * ========================================================================= */
-#define HEARTBEAT_DESTINATIONS IF_USB
+/* Native USB on this board is non-functional, so all debug output is routed to
+ * the ST-Link VCP (IF_UART). */
+#define HEARTBEAT_DESTINATIONS IF_UART
 
 #define SEND_INTERVAL_MS 1000
 #define COUNTER_MAX 255
@@ -152,6 +154,16 @@ enum InterfaceId {
 #define I2C_OUT_SCL   PA9
 #define I2C_OUT_ADDR  0x42
 #define I2C_OUT_SPEED 400000
+
+/* ===========================================================================
+ * 8. IMU PUBLISH RATE
+ *
+ * The BNO086 streams at ~100 Hz, but publishing every frame floods the 115200
+ * debug VCP and can block loop(). PUBLISH_RATE_HZ caps how often a frame is
+ * published (to both the VCP line and the I2C bus); intermediate frames are
+ * dropped. Set to 0 to publish every frame (no throttle).
+ * ========================================================================= */
+#define PUBLISH_RATE_HZ 20
 
 /* ===========================================================================
  * DERIVED / GUARDS - do not edit below this line.
