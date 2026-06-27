@@ -5,7 +5,7 @@
  * ECHO ROUTING TABLE - edit this list to control which interface echoes to
  * which. Each entry forwards bytes received on 'from' out to 'to'.
  *
- * IMU bytes are consumed by imu_source (the 7Semi BNO08x driver, parsed into
+ * IMU bytes are consumed by imu_source (the BNO086 SHTP driver, parsed into
  * ImuPacket); do not add IF_IMU as a source here or bytes will be split
  * between the two consumers.
  *

@@ -17,7 +17,7 @@
  *   IF_IMU  - IMU UART            (USART1 PB6/PB7, permanently attached IMU)
  *
  * Data flow:
- *   BNO086 -> IF_IMU -> imu_source (7Semi BNO08x lib, UART-SHTP) -> data_publisher
+ *   BNO086 -> IF_IMU -> imu_source (UART-SHTP driver) -> data_publisher
  *     data_publisher -> USB serial monitor  (if host connected)
  *     data_publisher -> I2C output bus      (always, see config.h section 7)
  */
@@ -41,7 +41,7 @@ void setup() {
      * (riskier) IMU bring-up. If IMU init ever hangs, the heartbeat still ran. */
     debug_tx_setup();
 
-    /* Reset + strap the IMU before the library starts talking SHTP to it. */
+    /* Reset + strap the IMU before imu_source starts talking SHTP to it. */
     bno086_begin();
 
     imu_source_setup();

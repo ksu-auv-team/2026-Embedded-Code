@@ -56,10 +56,10 @@
   }
 #endif
 
-/* This module talks to the BNO086 over UART-SHTP directly - no external driver
- * library. The 7Semi BNO08x library was dropped because its UART transport
- * (BnoUARTBus::rx) can't deframe a continuous 3 Mbaud stream, and the rest of
- * what it offered (Set-Feature TX, report parsing) is small and inlined here. */
+/* This module talks to the BNO086 over UART-SHTP directly, with no external
+ * driver dependency: it sends SHTP Set-Feature commands (TX), captures the
+ * continuous 3 Mbaud stream via circular DMA, deframes the HDLC/SHTP envelope,
+ * and parses the sensor reports - all self-contained below. */
 
 /* Report rate: 10 ms => 100 Hz, matching the old UART-RVC stream rate. */
 static const uint32_t REPORT_INTERVAL_MS = 10;
@@ -211,8 +211,8 @@ static void parse_shtp_frame(const uint8_t *f, size_t n) {
 
 static void deframe_byte(uint8_t b) {
     if (b == HDLC_FLAG) {
-        /* A flag closes the current frame and opens the next - the resync point
-         * the library's rx() lacked. */
+        /* A flag closes the current frame and opens the next - resyncing on
+         * every flag is what keeps us aligned on the continuous stream. */
         if (s_in_frame && s_got_pid && s_frame_len >= 5) {
             parse_shtp_frame(s_frame, s_frame_len);
         }
@@ -250,11 +250,22 @@ void imu_source_setup(void) {
     imu_dma_rx_begin();
 #endif
 
+    /* Let the BNO086 finish emitting its post-reset SHTP advertisement before we
+     * send commands - a Set-Feature that arrives while the chip is still booting
+     * is ignored, and the reports never start. */
+    delay(200);
+
     /* Enable the fused quaternion + gravity-free acceleration via Set-Feature.
      * We do not wait for the command response (unreliable to catch at 3 Mbaud);
-     * the requested reports simply start streaming and our RX path decodes them. */
-    shtp_tx_set_feature(SH2_ROTATION_VECTOR, REPORT_INTERVAL_MS);
-    shtp_tx_set_feature(SH2_LINEAR_ACCEL,    REPORT_INTERVAL_MS);
+     * the requested reports simply start streaming and our RX path decodes them.
+     * Send each twice with a gap: the first command can be missed if the chip is
+     * not yet ready, and an extra Set-Feature is harmless (idempotent). */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        shtp_tx_set_feature(SH2_ROTATION_VECTOR, REPORT_INTERVAL_MS);
+        delay(5);
+        shtp_tx_set_feature(SH2_LINEAR_ACCEL,    REPORT_INTERVAL_MS);
+        delay(20);
+    }
 
     if (Stream *c = interface_get(IF_UART)) {
         c->println("IMU: reports enabled (RotationVector + LinearAccel)");

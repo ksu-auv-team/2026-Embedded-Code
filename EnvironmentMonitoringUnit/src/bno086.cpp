@@ -10,7 +10,7 @@
 
 /* --- Timing (from CEVA sh2 reference HAL) --- */
 #define BNO_RESET_LOW_MS     12     /* hold NRST low >=10 ms                */
-#define BNO_BOOT_SETTLE_MS   100    /* settle after reset before library talks */
+#define BNO_BOOT_SETTLE_MS   100    /* settle after reset before the driver talks */
 
 /* The debug console we print bring-up status to. */
 static Stream *console(void) { return interface_get(IF_UART); }
@@ -24,17 +24,12 @@ void bno086_begin(void) {
      * releasing NRST.
      *
      * This function deliberately does NOT touch the IMU UART - not begin(), not
-     * read(). The 7Semi library (imu_source.cpp) is the SOLE owner of the IMU
-     * UART: it begin()s the port and performs every read. An earlier diagnostic
-     * "boot peek" here begin()'d and drained the UART, which left the link in a
-     * half-initialized, mid-frame state and made the library's first Set-Feature
-     * exchange fail (reports never enabled). Removing it lets the library own a
-     * clean stream from reset.
-     *
-     * NOTE: the library's UART bus is constructed with rstPin = -1 precisely so
-     * it does NOT pulse NRST itself - this function is the single owner of the
-     * reset + strapping sequence, which the library's plain reset pulse could
-     * not do (it never drives BOOTN/CLKSEL0).
+     * read(). The imu_source driver (imu_source.cpp) is the SOLE owner of the
+     * IMU UART: it begin()s the port and performs every read. An earlier
+     * diagnostic "boot peek" here begin()'d and drained the UART, which left the
+     * link in a half-initialized, mid-frame state and made the driver's first
+     * Set-Feature exchange fail (reports never enabled). Removing it lets the
+     * driver own a clean stream from reset.
      */
     pinMode(BNO_HINTN_PIN, INPUT_PULLUP);  /* active-low ready/interrupt */
 
@@ -53,9 +48,9 @@ void bno086_begin(void) {
     delay(BNO_RESET_LOW_MS);
     digitalWrite(BNO_NRST_PIN, HIGH);      /* release reset; straps sampled now */
 
-    /* Give the device a moment to come out of reset before the library begins
+    /* Give the device a moment to come out of reset before the driver begins
      * talking to it. Do NOT read the UART here (see note above). */
     delay(BNO_BOOT_SETTLE_MS);
 
-    if (c) c->println("BNO086: reset + strapped (UART owned by 7Semi library)");
+    if (c) c->println("BNO086: reset + strapped (UART owned by imu_source)");
 }

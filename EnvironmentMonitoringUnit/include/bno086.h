@@ -14,9 +14,8 @@
  * they are driven before NRST is released. (PS0/PS1 are board-fixed for
  * UART-SHTP.)
  *
- * This module only resets the chip and waits for it to signal ready on H_INTN.
- * All SHTP traffic - Product ID, Set Feature, and sensor reports - is handled
- * by the 7Semi BNO08x library; see imu_source.h.
+ * This module only resets and straps the chip. All SHTP traffic - Set Feature
+ * and sensor reports - is handled by the imu_source driver; see imu_source.h.
  */
 
 /** Reset the BNO086 with the correct strapping and wait for it to signal ready

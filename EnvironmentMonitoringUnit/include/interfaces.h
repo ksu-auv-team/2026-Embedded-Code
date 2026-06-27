@@ -30,7 +30,7 @@ const char *interface_name(InterfaceId id);
 /**
  * Concrete HardwareSerial for the IMU UART (IF_IMU).
  *
- * The 7Semi BNO08x UART transport needs the concrete HardwareSerial (not the
+ * The imu_source driver needs the concrete HardwareSerial (not the
  * generic Stream*) so it can begin() the port and drive SHTP framing. This is
  * the single owner of the IMU UART bring-up; interfaces_begin() deliberately
  * does NOT begin() it (see interfaces.cpp).

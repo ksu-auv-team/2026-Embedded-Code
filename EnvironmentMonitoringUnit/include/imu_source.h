@@ -4,14 +4,15 @@
 #include "imu_packet.h"
 #include <stdbool.h>
 
-/* BNO086 driver built on the 7Semi BNO08x library (UART-SHTP transport).
+/* Self-contained BNO086 driver over UART-SHTP (no external library).
  *
- * Replaces the old hand-rolled UART-RVC parser (imu_reader). The library owns
- * SHTP framing and report decoding; this module:
- *   - constructs the UART bus on the IMU HardwareSerial,
- *   - enables the Rotation Vector (orientation) and Linear Acceleration reports,
- *   - converts each rotation-vector quaternion to yaw/pitch/roll and packs it,
- *     together with the latest linear acceleration, into an ImuPacket.
+ * Replaces the old hand-rolled UART-RVC parser (imu_reader). This module:
+ *   - brings up the IMU UART with circular DMA RX (no byte loss at 3 Mbaud),
+ *   - sends SHTP Set-Feature to enable the Rotation Vector (orientation) and
+ *     Linear Acceleration reports,
+ *   - deframes the HDLC/SHTP stream and parses those reports, converting each
+ *     rotation-vector quaternion to yaw/pitch/roll and packing it, together with
+ *     the latest linear acceleration, into an ImuPacket.
  *
  * Call imu_source_setup() once from setup() (after bno086_begin() has reset and
  * strapped the chip), then imu_source_update() every loop iteration.

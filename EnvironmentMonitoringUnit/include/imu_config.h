@@ -18,11 +18,11 @@
  *
  * The BNO086 is strapped (PS0/PS1) for UART-SHTP - full Sensor Hub Transport
  * Protocol, bidirectional, with a command channel. This is the only mode
- * supported by the firmware: the IMU is driven through the 7Semi BNO08x
- * library (BnoUARTBus), which speaks SHTP wrapped in RFC1662/HDLC framing.
+ * supported by the firmware: the IMU is driven by the imu_source driver, which
+ * speaks SHTP wrapped in RFC1662/HDLC framing over the IMU UART.
  *
  * (The legacy one-way UART-RVC path and its hand-rolled parser were removed
- * when the driver switched to the 7Semi library.)
+ * when the driver switched to UART-SHTP.)
  * ------------------------------------------------------------------------- */
 
 /* ---------------------------------------------------------------------------
