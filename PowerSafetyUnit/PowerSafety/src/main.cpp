@@ -36,6 +36,7 @@ const uint8_t I2C_SLAVE_ADDRESS = 0x20;
 const float BATTERY_DIVIDER_1 = 10.0f;
 const float BATTERY_DIVIDER_2 = 10.0f;
 const float BATTERY_DIVIDER_3 = 10.0f;
+const bool DEBUG_FORCE_MOSFETS_ON = true;
 
 bool faultLatched = false;
 uint32_t overCurrentStartMs = 0;
@@ -207,6 +208,16 @@ int main(void)
 
   while (1)
   {
+    if (DEBUG_FORCE_MOSFETS_ON)
+    {
+      faultLatched = false;
+      setMosfets(true);
+      HAL_GPIO_WritePin(SIGNAL_GPIO_Port, SIGNAL_Pin, GPIO_PIN_RESET);
+      updateStatusPacket();
+      HAL_Delay(10);
+      continue;
+    }
+
     updateProtection();
     checkManualKill();
     setMosfets(!faultLatched);
