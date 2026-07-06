@@ -31,3 +31,10 @@ The Environment Monitor consists of a STM32G431KBT6, BNO086, and BME280. The blu
 | 13 | accuracy | u8 | 0=unreliable .. 3-high |
 
 # ESC Controller
+
+## ESC Packet
+
+| Byte | Field | Type | Encoding |
+|-------|:---:|------|------------|
+| 0 | cmd | u8 | Framing Byte; Must Equal 0x00 Or Packet Dropped |
+| 1-8 | esc | u8 | 0-255 |
