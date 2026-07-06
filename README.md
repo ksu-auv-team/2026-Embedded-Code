@@ -36,5 +36,12 @@ The Environment Monitor consists of a STM32G431KBT6, BNO086, and BME280. The blu
 
 | Byte | Field | Type | Encoding |
 |-------|:---:|------|------------|
-| 0 | cmd | u8 | Framing Byte; Must Equal 0x00 Or Packet Dropped |
-| 1-8 | esc | u8 | 0-255 |
+| 0 | cmd | u8 | Framing/Validation Byte; Must Equal 0x00 Or Packet Dropped |
+| 1 | ESC1 | u8 | 0-255 |
+| 2 | ESC2 | u8 | 0-255 |
+| 3 | ESC3 | u8 | 0-255 |
+| 4 | ESC4 | u8 | 0-255 |
+| 5 | ESC5 | u8 | 0-255 |
+| 6 | ESC6 | u8 | 0-255 |
+| 7 | ESC7 | u8 | 0-255 |
+| 8 | ESC8 | u8 | 0-255 |
