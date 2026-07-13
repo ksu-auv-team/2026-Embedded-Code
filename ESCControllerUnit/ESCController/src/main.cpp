@@ -27,13 +27,49 @@
 static_assert((ESC_I2C_ADDRESS >= 0x08) && (ESC_I2C_ADDRESS <= 0x77), "ESC_I2C_ADDRESS must be a 7-bit I2C address (0x08..0x77)");
 
 static constexpr uint8_t I2C_SLAVE_ADDRESS = static_cast<uint8_t>(ESC_I2C_ADDRESS);
-static constexpr uint8_t THRUST_CMD = 0x00;
+#ifndef ESC_THRUST_CMD
+#define ESC_THRUST_CMD 0x00
+#endif
+
+#ifndef ESC_REQUIRE_CMD_BYTE
+#define ESC_REQUIRE_CMD_BYTE 1
+#endif
+
+static constexpr uint8_t THRUST_CMD = static_cast<uint8_t>(ESC_THRUST_CMD);
 static constexpr uint8_t I2C_SDA_PIN = ESC_I2C_SDA_PIN;
 static constexpr uint8_t I2C_SCL_PIN = ESC_I2C_SCL_PIN;
 
+#ifndef ESC_PWM_MIN_US
+#define ESC_PWM_MIN_US 1000
+#endif
+
+#ifndef ESC_PWM_MAX_US
+#define ESC_PWM_MAX_US 2000
+#endif
+
+#ifndef ESC_FAILSAFE_RAW
+#define ESC_FAILSAFE_RAW 128
+#endif
+
+#ifndef ESC_ARM_RAW
+#define ESC_ARM_RAW ESC_FAILSAFE_RAW
+#endif
+
+#ifndef ESC_ARM_TIME_MS
+#define ESC_ARM_TIME_MS 3000
+#endif
+
+#ifndef ESC_ENABLE_SERIAL_DIAG
+#define ESC_ENABLE_SERIAL_DIAG 1
+#endif
+
+#ifndef ESC_SERIAL_BAUD
+#define ESC_SERIAL_BAUD 115200
+#endif
+
 static constexpr uint8_t ESC_COUNT = 8;
-static constexpr uint16_t PWM_MIN = 1100;
-static constexpr uint16_t PWM_MAX = 1900;
+static constexpr uint16_t PWM_MIN = ESC_PWM_MIN_US;
+static constexpr uint16_t PWM_MAX = ESC_PWM_MAX_US;
 
 static constexpr uint16_t LOOP_FREQUENCY_HZ = 50;
 static constexpr uint16_t LOOP_DELAY_MS = 1000 / LOOP_FREQUENCY_HZ;
@@ -48,6 +84,13 @@ static const uint8_t ESC_PINS[ESC_COUNT] = {
 
 static constexpr uint8_t STATUS_LED_PIN = PA0;
 static constexpr size_t PACKET_SIZE = ESC_COUNT + 1;
+static constexpr uint8_t FAILSAFE_RAW = static_cast<uint8_t>(ESC_FAILSAFE_RAW);
+static constexpr uint8_t ARM_RAW = static_cast<uint8_t>(ESC_ARM_RAW);
+static constexpr uint32_t ARM_TIME_MS = static_cast<uint32_t>(ESC_ARM_TIME_MS);
+
+static_assert(PWM_MIN < PWM_MAX, "ESC_PWM_MIN_US must be less than ESC_PWM_MAX_US");
+static_assert(FAILSAFE_RAW <= 255, "ESC_FAILSAFE_RAW must be 0..255");
+static_assert(ARM_RAW <= 255, "ESC_ARM_RAW must be 0..255");
 
 Servo esc[ESC_COUNT];
 TwoWire i2cBus(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -65,6 +108,40 @@ uint32_t statusLedLastToggleTime = 0;
 uint8_t packetFlashTogglesRemaining = 0;
 bool statusLedState = false;
 uint32_t lastControlTick = 0;
+bool escAttached[ESC_COUNT] = {false};
+bool escAttachFailure = false;
+uint32_t rxPacketCount = 0;
+uint32_t rxInvalidLenCount = 0;
+uint32_t rxInvalidCmdCount = 0;
+
+static void logPacketReject(const char *reason, uint8_t len, uint8_t cmd) {
+#if ESC_ENABLE_SERIAL_DIAG
+    Serial.print("RX drop: ");
+    Serial.print(reason);
+    Serial.print(" len=");
+    Serial.print(len);
+    Serial.print(" cmd=0x");
+    Serial.println(cmd, HEX);
+#else
+    (void)reason;
+    (void)len;
+    (void)cmd;
+#endif
+}
+
+static void logEscAttachStatus() {
+#if ESC_ENABLE_SERIAL_DIAG
+    Serial.println("ESC attach status:");
+    for (uint8_t i = 0; i < ESC_COUNT; i++) {
+        Serial.print("  ESC");
+        Serial.print(i + 1);
+        Serial.print(" pin ");
+        Serial.print(ESC_PINS[i]);
+        Serial.print(": ");
+        Serial.println(escAttached[i] ? "OK" : "FAILED");
+    }
+#endif
+}
 
 static inline uint16_t mapPwm(uint8_t value) {
     return static_cast<uint16_t>((static_cast<uint32_t>(value) * (PWM_MAX - PWM_MIN)) / 255U + PWM_MIN);
@@ -78,8 +155,8 @@ static void updateEscOutputs() {
 
 static void setEscFailsafe() {
     for (uint8_t i = 0; i < ESC_COUNT; i++) {
-        motorValues[i] = 128;
-        esc[i].writeMicroseconds(mapPwm(128));
+        motorValues[i] = FAILSAFE_RAW;
+        esc[i].writeMicroseconds(mapPwm(FAILSAFE_RAW));
     }
 }
 
@@ -165,13 +242,25 @@ static void processI2CPacket(uint32_t now) {
     i2cPacketReady = false;
     interrupts();
 
-    if (len != PACKET_SIZE || packet[0] != THRUST_CMD) {
+    if (len != PACKET_SIZE) {
+        rxInvalidLenCount++;
+        logPacketReject("bad_len", len, packet[0]);
         return;
     }
+
+#if ESC_REQUIRE_CMD_BYTE
+    if (packet[0] != THRUST_CMD) {
+        rxInvalidCmdCount++;
+        logPacketReject("bad_cmd", len, packet[0]);
+        return;
+    }
+#endif
 
     for (uint8_t i = 0; i < ESC_COUNT; i++) {
         motorValues[i] = packet[i + 1];
     }
+
+    rxPacketCount++;
 
     newData = true;
     packetFlashRequest = true;
@@ -179,6 +268,10 @@ static void processI2CPacket(uint32_t now) {
 }
 
 void setup() {
+#if ESC_ENABLE_SERIAL_DIAG
+    Serial.begin(ESC_SERIAL_BAUD);
+#endif
+
     pinMode(STATUS_LED_PIN, OUTPUT);
     setStatusLed(false);
 
@@ -187,9 +280,22 @@ void setup() {
     i2cBus.onRequest(onI2CRequest);
 
     for (uint8_t i = 0; i < ESC_COUNT; i++) {
-        motorValues[i] = 128;
-        esc[i].attach(ESC_PINS[i]);
+        motorValues[i] = FAILSAFE_RAW;
+        esc[i].attach(ESC_PINS[i], PWM_MIN, PWM_MAX);
+        escAttached[i] = esc[i].attached();
+        if (!escAttached[i]) {
+            escAttachFailure = true;
+        }
     }
+
+    logEscAttachStatus();
+
+    // Hold arm/neutral output long enough for ESC boot and arming windows.
+    const uint16_t armPulse = mapPwm(ARM_RAW);
+    for (uint8_t i = 0; i < ESC_COUNT; i++) {
+        esc[i].writeMicroseconds(armPulse);
+    }
+    delay(ARM_TIME_MS);
 
     updateEscOutputs();
     lastReceiveTime = millis();
