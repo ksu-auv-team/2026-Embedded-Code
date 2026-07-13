@@ -76,6 +76,7 @@ static constexpr uint16_t LOOP_DELAY_MS = 1000 / LOOP_FREQUENCY_HZ;
 static constexpr uint32_t LINK_TIMEOUT_MS = 2000;
 static constexpr uint32_t LED_SLOW_BLINK_MS = 500;
 static constexpr uint32_t LED_FAST_BLINK_MS = 120;
+static constexpr uint8_t LED_PACKET_FLASH_COUNT = 8;
 
 // Matches CubeMX main.h pinout: ESC1..ESC8 = PA1..PA7, PA10.
 static const uint8_t ESC_PINS[ESC_COUNT] = {
@@ -106,6 +107,7 @@ volatile uint32_t lastReceiveTime = 0;
 
 uint32_t statusLedLastToggleTime = 0;
 uint8_t packetFlashTogglesRemaining = 0;
+uint8_t packetFlashBurstsPending = 0;
 bool statusLedState = false;
 uint32_t lastControlTick = 0;
 bool escAttached[ESC_COUNT] = {false};
@@ -168,7 +170,14 @@ static void setStatusLed(bool state) {
 static void updateStatusLed(uint32_t now) {
     if (packetFlashRequest) {
         packetFlashRequest = false;
-        packetFlashTogglesRemaining = 4;
+        if (packetFlashBurstsPending < 255) {
+            packetFlashBurstsPending++;
+        }
+    }
+
+    if (packetFlashTogglesRemaining == 0 && packetFlashBurstsPending > 0) {
+        packetFlashBurstsPending--;
+        packetFlashTogglesRemaining = static_cast<uint8_t>(LED_PACKET_FLASH_COUNT * 2);
         statusLedLastToggleTime = now;
     }
 
