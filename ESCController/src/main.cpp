@@ -1,4 +1,4 @@
-#include <Arduino.h>
+  #include <Arduino.h>
 #include <Wire.h>
 
 // ============================================================================
@@ -40,6 +40,12 @@
 #define THRUSTER_MIN_US       1112
 #define THRUSTER_MAX_US       1912
 #define THRUSTER_NEUTRAL_US   1512
+
+// Test mode
+#define ENABLE_THRUSTER_TEST_MODE 0       // Set to 1 to run a channel-by-channel test sweep
+#define THRUSTER_TEST_PULSE_US    1800    // Pulse width applied to each channel in test mode
+#define THRUSTER_TEST_STEP_MS     1000     // Time to hold each channel at the test pulse
+#define THRUSTER_TEST_IDLE_US     THRUSTER_NEUTRAL_US
 
 // Timing
 #define STARTUP_DELAY_MS      5000      // Hold neutral on startup (ESC arming)
@@ -109,6 +115,10 @@ unsigned long startupTime          = 0;
 bool          startupPhaseComplete = false;
 bool          failsafeActive       = false;
 
+// Test mode state
+uint8_t       testModeChannelIndex = 0;
+unsigned long lastTestModeStepTime = 0;
+
 // LED
 unsigned long lastLEDToggleTime = 0;
 bool          ledState          = false;
@@ -124,6 +134,7 @@ void initLED();
 void updateLED();
 void ledWrite(bool on);
 void updateThrusters();
+void runThrusterTestMode();
 void setThrusterMicros(uint8_t idx, uint16_t microseconds);
 void setAllThrusters(uint16_t microseconds);
 void i2cReceiveHandler(int numBytes);
@@ -249,6 +260,18 @@ void checkI2CTimeout() {
   }
 }
 
+void runThrusterTestMode() {
+  unsigned long now = millis();
+  if ((now - lastTestModeStepTime) < THRUSTER_TEST_STEP_MS) {
+    return;
+  }
+
+  lastTestModeStepTime = now;
+  setAllThrusters(THRUSTER_TEST_IDLE_US);
+  setThrusterMicros(testModeChannelIndex, THRUSTER_TEST_PULSE_US);
+  testModeChannelIndex = (testModeChannelIndex + 1) % NUM_THRUSTERS;
+}
+
 // ---------------------------------------------------------------------------
 // LED
 // ---------------------------------------------------------------------------
@@ -316,6 +339,12 @@ void setup() {
   Serial.print("PWM: "); Serial.print(THRUSTER_FREQUENCY); Serial.print(" Hz, ");
   Serial.print(THRUSTER_MIN_US); Serial.print('-'); Serial.print(THRUSTER_MAX_US);
   Serial.println(" us");
+#if ENABLE_THRUSTER_TEST_MODE
+  Serial.println("Thruster test mode enabled.");
+  Serial.print("Each channel will be driven to "); Serial.print(THRUSTER_TEST_PULSE_US);
+  Serial.print(" us for "); Serial.print(THRUSTER_TEST_STEP_MS);
+  Serial.println(" ms in order.");
+#endif
 #endif
 
   initLED();
@@ -347,8 +376,12 @@ void loop() {
     return;
   }
 
+#if ENABLE_THRUSTER_TEST_MODE
+  runThrusterTestMode();
+#else
   updateThrusters();
   checkI2CTimeout();
+#endif
 
   delay(CYCLE_TIME_MS);
 }
