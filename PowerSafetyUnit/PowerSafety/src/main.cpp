@@ -32,7 +32,7 @@ const float CURRENT_SPIKE_LIMIT_A      = 60.0f;
 const float CURRENT_SUSTAIN_LIMIT_A    = 50.0f;
 const uint32_t CURRENT_SUSTAIN_TIME_MS = 50;
 
-const uint8_t I2C_SLAVE_ADDRESS = 0x20;
+const uint8_t I2C_SLAVE_ADDRESS = 0x4A;
 const float BATTERY_DIVIDER_1 = 10.0f;
 const float BATTERY_DIVIDER_2 = 10.0f;
 const float BATTERY_DIVIDER_3 = 10.0f;
@@ -80,7 +80,6 @@ void setMosfets(bool on)
 {
   GPIO_PinState s = on ? GPIO_PIN_SET : GPIO_PIN_RESET;
   HAL_GPIO_WritePin(Q3Gate_GPIO_Port, Q3Gate_Pin, s);
-  HAL_GPIO_WritePin(Q4Gate_GPIO_Port, Q4Gate_Pin, s);
   HAL_GPIO_WritePin(Q6Gate_GPIO_Port, Q6Gate_Pin, s);
 }
 
@@ -135,24 +134,35 @@ void checkManualKill(void)
 
 /* ===================== I2C slave to Orin ================================== */
 
-struct __attribute__((packed)) StatusPacket
-{
-  float currentA;
-  float vBatt1;
-  float vBatt2;
-  float vBatt3;
-  uint8_t fault;
-};
+uint8_t orinPowerCommand = 1;
+bool killSwitchMessageShown = false;
 
-StatusPacket statusPkt;
-
-void updateStatusPacket(void)
+void updateOrinPowerCommand(void)
 {
-  statusPkt.currentA = readCurrentA();
-  statusPkt.vBatt1   = readBatteryVoltage(&hadc1, ADC_CHANNEL_1, BATTERY_DIVIDER_1);
-  statusPkt.vBatt2   = readBatteryVoltage(&hadc1, ADC_CHANNEL_2, BATTERY_DIVIDER_2);
-  statusPkt.vBatt3   = readBatteryVoltage(&hadc1, ADC_CHANNEL_4, BATTERY_DIVIDER_3);
-  statusPkt.fault    = faultLatched ? 1 : 0;
+  GPIO_PinState switchState = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_5);
+  orinPowerCommand = (switchState == GPIO_PIN_SET) ? 1u : 0u;
+}
+
+void logKillSwitchState(void)
+{
+  if (orinPowerCommand == 1u)
+  {
+    if (!killSwitchMessageShown)
+    {
+      const char msg[] = "Killswitch closed: sending 1\r\n";
+      HAL_UART_Transmit(&huart1, (uint8_t *)msg, sizeof(msg) - 1, 100);
+      killSwitchMessageShown = true;
+    }
+  }
+  else
+  {
+    if (killSwitchMessageShown)
+    {
+      const char msg[] = "Killswitch open: sending 0\r\n";
+      HAL_UART_Transmit(&huart1, (uint8_t *)msg, sizeof(msg) - 1, 100);
+    }
+    killSwitchMessageShown = false;
+  }
 }
 
 #ifdef __cplusplus
@@ -162,15 +172,17 @@ extern "C"
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode)
 {
+  (void)AddrMatchCode;
+
   if (hi2c->Instance != I2C2)
   {
     return;
   }
 
-  if (TransferDirection == I2C_DIRECTION_TRANSMIT)
+  if (TransferDirection == I2C_DIRECTION_RECEIVE)
   {
-    updateStatusPacket();
-    HAL_I2C_Slave_Transmit_IT(hi2c, (uint8_t *)&statusPkt, sizeof(statusPkt));
+    updateOrinPowerCommand();
+    HAL_I2C_Slave_Transmit_IT(hi2c, &orinPowerCommand, 1);
   }
 }
 
@@ -201,7 +213,8 @@ int main(void)
   MX_OPAMP3_Init();
   MX_USART1_UART_Init();
 
-  updateStatusPacket();
+  updateOrinPowerCommand();
+  logKillSwitchState();
   setMosfets(true);
   HAL_GPIO_WritePin(SIGNAL_GPIO_Port, SIGNAL_Pin, GPIO_PIN_RESET);
   HAL_I2C_EnableListen_IT(&hi2c2);
@@ -213,7 +226,8 @@ int main(void)
       faultLatched = false;
       setMosfets(true);
       HAL_GPIO_WritePin(SIGNAL_GPIO_Port, SIGNAL_Pin, GPIO_PIN_RESET);
-      updateStatusPacket();
+      updateOrinPowerCommand();
+      logKillSwitchState();
       HAL_Delay(10);
       continue;
     }
@@ -222,7 +236,8 @@ int main(void)
     checkManualKill();
     setMosfets(!faultLatched);
     HAL_GPIO_WritePin(SIGNAL_GPIO_Port, SIGNAL_Pin, faultLatched ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    updateStatusPacket();
+    updateOrinPowerCommand();
+    logKillSwitchState();
     HAL_Delay(10);
   }
 }
@@ -347,7 +362,7 @@ static void MX_I2C2_Init(void)
 {
   hi2c2.Instance = I2C2;
   hi2c2.Init.Timing = 0x00503D58;
-  hi2c2.Init.OwnAddress1 = I2C_SLAVE_ADDRESS;
+  hi2c2.Init.OwnAddress1 = (I2C_SLAVE_ADDRESS << 1);
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c2.Init.OwnAddress2 = 0;
@@ -434,7 +449,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   HAL_GPIO_WritePin(GPIOA, SIGNAL_Pin|Q6Gate_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, Q3Gate_Pin|Q4Gate_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, Q3Gate_Pin, GPIO_PIN_RESET);
 
   GPIO_InitStruct.Pin = OPAMP1_P_Pin|OPAMP1_N_Pin|OPAMP2_N_Pin|OPAMP2_P_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
@@ -447,10 +462,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = Q3Gate_Pin|Q4Gate_Pin;
+  GPIO_InitStruct.Pin = Q3Gate_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = Q4Gate_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
